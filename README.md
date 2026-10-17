@@ -66,7 +66,6 @@ The paper's T5 experiments use two tasks: English to German translation (WMT EnD
 |---|---|---|---|---|---|
 | WMT En-De (T2T config) | `wmt_t2t_translate/de-en:1.0.0` | train 4,592,289 / validation 3,000 / test 3,003 | 1.61 GiB | 1.39 GiB | https://www.tensorflow.org/datasets/catalog/wmt_t2t_translate |
 | CNN/DailyMail (non-anonymized) | `cnn_dailymail:3.4.0` | train 287,113 / validation 13,368 / test 11,490 | 558.32 MiB | 1.29 GiB | https://www.tensorflow.org/datasets/catalog/cnn_dailymail |
-| lm1b (optional, GPT-like experiment only) | `lm1b:1.1.0` | train 30,301,028 / test 306,688 | 1.67 GiB | 4.40 GiB | https://www.tensorflow.org/datasets/catalog/lm1b |
 
 ```python
 import tensorflow_datasets as tfds
