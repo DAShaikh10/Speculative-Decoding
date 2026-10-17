@@ -60,7 +60,7 @@ Notes:
 
 ## Datasets
 
-The paper's T5 experiments use two tasks: English to German translation (WMT EnDe) and CNN/DailyMail summarization. Its GPT-like experiment uses lm1b. T5's own code loads the first two from TensorFlow Datasets (TFDS). WMT can be loaded at T5's pinned version. CNN/DM cannot: T5 pins version 3.1.0, but current TFDS (checked on 4.9.10) refuses to load it and offers only 3.4.0, so use 3.4.0. Sizes below are the ones TFDS lists, in its own units (GiB/MiB).
+The paper's T5 experiments use two tasks: English to German translation (WMT EnDe) and CNN/DailyMail summarization. It's GPT-like experiment uses lm1b. T5's own code loads the first two from TensorFlow Datasets (TFDS). WMT can be loaded at T5's pinned version. CNN/DM cannot: T5 pins version 3.1.0, but current TFDS (checked on 4.9.10) refuses to load it and offers only 3.4.0, so use 3.4.0. Sizes below are the ones TFDS lists, in its own units (GiB/MiB).
 
 | Dataset | TFDS id (pinned) | Splits (examples) | Download | Prepared on disk | Link |
 |---|---|---|---|---|---|
