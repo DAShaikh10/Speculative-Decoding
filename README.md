@@ -40,6 +40,24 @@ We don't have TPUs or access to the proprietary models used in the paper (like L
 - Absolute timings will be different because the hardware is different. What should carry over is the *shape* of the results: α values, relative speedups, and how they move with γ and model size.
 - we'll note where the paper under-specifies a detail (exact checkpoints, decoding hyperparameters, how timing was measured) and what we assumed.
 
+## Models
+
+The paper used T5 v1.1 checkpoints fine-tuned per task (target T5-XXL; drafts T5-small, T5-base, T5-large). We use the original `google-t5` checkpoints instead: they were pretrained on a multi-task mixture that includes WMT EnDe and CNN/DM, so they work out of the box with the `translate English to German:` and `summarize:` prefixes, and the whole family shares one tokenizer.
+
+| Model | Params | Download (fp32) | In bf16/fp16 | Link |
+|---|---|---|---|---|
+| t5-small | 60M | 0.24 GB | ~0.12 GB | https://huggingface.co/google-t5/t5-small |
+| t5-base | 220M | 0.89 GB | ~0.45 GB | https://huggingface.co/google-t5/t5-base |
+| t5-large | 770M | 2.95 GB | ~1.5 GB | https://huggingface.co/google-t5/t5-large |
+| t5-3b | 3B | 11.41 GB | ~5.7 GB | https://huggingface.co/google-t5/t5-3b |
+| t5-11b (the "XXL") | 11B | 45.23 GB | ~22.6 GB | https://huggingface.co/google-t5/t5-11b |
+
+Notes:
+
+- Sizes are for a single weight file. The Hugging Face repo pages show a larger total (about 34 GB for t5-3b, about 90 GB for t5-11b) because each repo stores the same weights in several formats (safetensors, PyTorch `.bin`, TensorFlow `.h5`). `from_pretrained` downloads only one of them.
+- t5-3b is the cheaper stand-in target for development; t5-11b is the faithful target.
+- On V100s use fp16 (no native bf16), and watch for fp16 overflow/NaNs in the larger T5 models. A100s can use bf16.
+
 ## How we'll judge success
 
 - The acceptance rates we measure land close to the paper's.
