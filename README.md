@@ -58,6 +58,29 @@ Notes:
 - t5-3b is the cheaper stand-in target for development; t5-11b is the faithful target.
 - On V100s use fp16 (no native bf16), and watch for fp16 overflow/NaNs in the larger T5 models. A100s can use bf16.
 
+## Datasets
+
+The paper's T5 experiments use two tasks: English to German translation (WMT EnDe) and CNN/DailyMail summarization. Its GPT-like experiment uses lm1b. T5's own code loads the first two from TensorFlow Datasets (TFDS). WMT can be loaded at T5's pinned version. CNN/DM cannot: T5 pins version 3.1.0, but current TFDS (checked on 4.9.10) refuses to load it and offers only 3.4.0, so use 3.4.0. Sizes below are the ones TFDS lists, in its own units (GiB/MiB).
+
+| Dataset | TFDS id (pinned) | Splits (examples) | Download | Prepared on disk | Link |
+|---|---|---|---|---|---|
+| WMT En-De (T2T config) | `wmt_t2t_translate/de-en:1.0.0` | train 4,592,289 / validation 3,000 / test 3,003 | 1.61 GiB | 1.39 GiB | https://www.tensorflow.org/datasets/catalog/wmt_t2t_translate |
+| CNN/DailyMail (non-anonymized) | `cnn_dailymail:3.4.0` | train 287,113 / validation 13,368 / test 11,490 | 558.32 MiB | 1.29 GiB | https://www.tensorflow.org/datasets/catalog/cnn_dailymail |
+| lm1b (optional, GPT-like experiment only) | `lm1b:1.1.0` | train 30,301,028 / test 306,688 | 1.67 GiB | 4.40 GiB | https://www.tensorflow.org/datasets/catalog/lm1b |
+
+```python
+import tensorflow_datasets as tfds
+
+wmt = tfds.load("wmt_t2t_translate/de-en:1.0.0", split="test")
+cnn = tfds.load("cnn_dailymail:3.4.0", split="test")
+```
+
+Notes:
+
+- **Pins:** T5's `tasks.py` uses `wmt_t2t_translate/de-en:1.0.0` (task `wmt_t2t_ende_v003`) and `cnn_dailymail:3.1.0`. Current TFDS loads the WMT pin as-is, but for CNN/DM it rejects 3.1.0 with "cannot be loaded at version 3.1.0, only: 3.4.0". Use 3.4.0. TFDS's release notes say the changes after 3.1.0 only remove an extra space before the added sentence period (which should not affect ROUGE) and add `publisher` and `id` features, so the difference from the paper's setup should be negligible.
+- **What the T5 paper says (Section 2.3):** all data comes from TFDS. WMT En-De uses the same training data as Vaswani et al. 2017 (News Commentary v13, Common Crawl, Europarl v7) with newstest2013 as validation. CNN/DM is the non-anonymized version from See et al. 2017.
+- **WMT split names:** the TFDS page gives only the counts. The T2T config's script lists newstest2013 as validation and newstest2014 as test, and the 3,000 and 3,003 counts are consistent with that.
+
 ## How we'll judge success
 
 - The acceptance rates we measure land close to the paper's.
