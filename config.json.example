@@ -1,0 +1,17 @@
+{
+  "namespace": "your namespace",
+  "registry": "registry.datexis.com",
+  "image_name": "t5_server",
+  "image_tag": "latest",
+  "gpu": "a100",
+  "model_name": "google-t5/t5-small",
+  "served_model_name": "t5-small",
+  "dtype": "float32",
+  "torch_cuda": "cu128",
+  "server_name": "t5-small-server",
+  "pvc_name": "t5-model-cache",
+  "pvc_size": "20Gi",
+  "storage_class": "shared",
+  "access_mode": "ReadWriteMany",
+  "image_pull_secret": "private-registry-auth"
+}

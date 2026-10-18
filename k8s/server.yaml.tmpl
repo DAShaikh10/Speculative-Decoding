@@ -1,0 +1,80 @@
+# T5 inference server (Deployment + Service).
+# Rendered from config.json by scripts/render.py, do not apply the .tmpl directly.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${server_name}
+  namespace: ${namespace}
+  labels:
+    app: ${server_name}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${server_name}
+  template:
+    metadata:
+      labels:
+        app: ${server_name}
+    spec:
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: ${image_pull_secret}
+      nodeSelector:
+        gpu: ${gpu}
+      containers:
+        - name: t5-server
+          image: ${image}
+          imagePullPolicy: Always
+          command: ["/app/entrypoint.sh"]
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MODEL_NAME
+              value: "${model_name}"
+            - name: SERVED_MODEL_NAME
+              value: "${served_model_name}"
+            - name: DTYPE
+              value: "${dtype}"
+            - name: TORCH_CUDA
+              value: "${torch_cuda}"
+            - name: HF_HOME
+              value: /cache/hf
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 90   # ~15 min: first start installs packages and downloads weights
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /cache
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${server_name}
+  namespace: ${namespace}
+spec:
+  selector:
+    app: ${server_name}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
