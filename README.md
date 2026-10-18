@@ -58,6 +58,7 @@ Notes:
 - t5-3b is the cheaper stand-in target for development; t5-11b is the faithful target.
 - On V100s use fp16 (no native bf16), and watch for fp16 overflow/NaNs in the larger T5 models. A100s can use bf16.
 
+
 ## Hosting a model on the cluster
 
 `serving/` has a small FastAPI server (`/health`, `/info`, `/generate`) that serves one T5 checkpoint, plus a Dockerfile. Everyone has their own Kubernetes namespace and registry path, so all per-user settings live in `config.json`; the manifests in `k8s/*.yaml.tmpl` are templates filled in from it.
@@ -84,6 +85,29 @@ The image is slim (just the server code). On first start the container installs 
 - **V100 (Volta):** the cu128 wheels have no kernels for V100, so the server would start but fail on the first `/generate` with `CUDA error: no kernel image is available`. Set `"torch_cuda": "cu126"` and `"gpu": "v100"`, run `scripts/apply.sh`. Also keep `dtype` at `float32`, since T5 can overflow in fp16.
 - **B200 (Blackwell):** needs cu128. The default PyPI torch wheel is the CUDA 12.6 build and has no Blackwell kernels, which is why we install from PyTorch's own index.
 - Changing `torch_cuda` makes the pod reinstall its packages on the next start (a few minutes).
+
+## Datasets
+
+The paper's T5 experiments use two tasks: English to German translation (WMT EnDe) and CNN/DailyMail summarization. It's GPT-like experiment uses lm1b. T5's own code loads the first two from TensorFlow Datasets (TFDS). WMT can be loaded at T5's pinned version. CNN/DM cannot: T5 pins version 3.1.0, but current TFDS (checked on 4.9.10) refuses to load it and offers only 3.4.0, so use 3.4.0. Sizes below are the ones TFDS lists, in its own units (GiB/MiB).
+
+| Dataset | TFDS id (pinned) | Splits (examples) | Download | Prepared on disk | Link |
+|---|---|---|---|---|---|
+| WMT En-De (T2T config) | `wmt_t2t_translate/de-en:1.0.0` | train 4,592,289 / validation 3,000 / test 3,003 | 1.61 GiB | 1.39 GiB | https://www.tensorflow.org/datasets/catalog/wmt_t2t_translate |
+| CNN/DailyMail (non-anonymized) | `cnn_dailymail:3.4.0` | train 287,113 / validation 13,368 / test 11,490 | 558.32 MiB | 1.29 GiB | https://www.tensorflow.org/datasets/catalog/cnn_dailymail |
+
+```python
+import tensorflow_datasets as tfds
+
+wmt = tfds.load("wmt_t2t_translate/de-en:1.0.0", split="test")
+cnn = tfds.load("cnn_dailymail:3.4.0", split="test")
+```
+
+Notes:
+
+- **Pins:** T5's `tasks.py` uses `wmt_t2t_translate/de-en:1.0.0` (task `wmt_t2t_ende_v003`) and `cnn_dailymail:3.1.0`. Current TFDS loads the WMT pin as-is, but for CNN/DM it rejects 3.1.0 with "cannot be loaded at version 3.1.0, only: 3.4.0". Use 3.4.0. TFDS's release notes say the changes after 3.1.0 only remove an extra space before the added sentence period (which should not affect ROUGE) and add `publisher` and `id` features, so the difference from the paper's setup should be negligible.
+- **What the T5 paper says (Section 2.3):** all data comes from TFDS. WMT En-De uses the same training data as Vaswani et al. 2017 (News Commentary v13, Common Crawl, Europarl v7) with newstest2013 as validation. CNN/DM is the non-anonymized version from See et al. 2017.
+- **WMT split names:** the TFDS page gives only the counts. The T2T config's script lists newstest2013 as validation and newstest2014 as test, and the 3,000 and 3,003 counts are consistent with that.
+
 
 ## How we'll judge success
 
