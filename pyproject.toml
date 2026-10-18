@@ -1,0 +1,51 @@
+[project]
+name = "speculative-decoding"
+version = "0.1.0"
+description = "Replication of the speculative decoding algorithm from the paper 'Fast Inference of Transformers via Speculative Decoding' by Leviathan et al., 2023."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=5.1.0",
+    "sentencepiece>=0.2.2",
+    "torch>=2.14.1",
+    "transformers>=5.20.1",
+]
+
+[dependency-groups]
+dev = [
+    "black>=26.10.1",
+    "pylint>=4.1.3",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/speculative_decoding"]
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.pylint.main]
+ignore = [
+    ".venv",
+    "__pycache__"
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.ruff]
+line-length = 120
+target-version = "py312" # Keeps Ruff aligned with your project requirements.
+
+[tool.ruff.lint]
+extend-select = ["I"] # Adds isort rules (I) to the default set (E, F)
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

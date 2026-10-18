@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "charliermarsh.ruff",
+    "esbenp.prettier-vscode",
+    "ms-azuretools.vscode-containers",
+    "ms-python.python",
+    "ms-python.black-formatter",
+    "ms-python.pylint",
+    "redhat.vscode-yaml"
+  ]
+}
