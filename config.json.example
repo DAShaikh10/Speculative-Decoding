@@ -4,7 +4,8 @@
   "image_name": "t5_server",
   "image_tag": "latest",
   "gpu": "a100",
-  "model_name": "google-t5/t5-small",
+  "draft_model_name": "google-t5/t5-small",
+  "target_model_name": "google-t5/t5-11b"
   "served_model_name": "t5-small",
   "dtype": "float32",
   "torch_cuda": "cu128",

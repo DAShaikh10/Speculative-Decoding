@@ -65,7 +65,7 @@ Notes:
 
 1. Copy `config.json.example` to `config.json` (it is git-ignored, so it stays yours) and set `namespace` to yours (the image becomes `registry.datexis.com/<namespace>/<image_name>:<image_tag>`) and `gpu` to the node label you want (`v100`, `a100`, `b200`, ...).
 2. Build and push the image: `scripts/build_push.sh`
-3. Deploy: `scripts/apply.sh` (add `--dry-run` to check first). It fills `k8s/*.yaml.tmpl` from `config.json` and pipes the result straight into `kubectl apply`, so no manifest with a hardcoded namespace is ever stored. Use `python3 scripts/render.py` to just print the YAML.
+3. Deploy: `scripts/apply.sh` (add `--dry-run` to check first). It generates `k8s/*.yaml` from `k8s/*.yaml.tmpl` and `config.json`, then runs `kubectl apply` on them. Use `python3 scripts/generate_manifests.py` to only generate the YAML. `registry` in `config.json` is optional; leave it empty if the image doesn't need one.
 5. Try it: `kubectl -n <namespace> port-forward svc/t5-small-server 8000:8000`, then
 
 ```bash

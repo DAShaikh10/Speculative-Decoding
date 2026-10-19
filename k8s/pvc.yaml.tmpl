@@ -1,14 +1,14 @@
 # Persistent cache for downloaded model weights (HF_HOME=/cache/hf).
-# Rendered from config.json by scripts/render.py, do not apply the .tmpl directly.
+# Rendered from `config.json` by `scripts/generate_manifests.py`, do not apply the .tmpl directly.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: ${pvc_name}
   namespace: ${namespace}
 spec:
-  storageClassName: ${storage_class}
   accessModes:
     - ${access_mode}
   resources:
     requests:
       storage: ${pvc_size}
+  storageClassName: ${storage_class}

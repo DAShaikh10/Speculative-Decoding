@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build the server image and push it to the private registry, using config.json.
-# Image name: <registry>/<namespace>/<image_name>:<image_tag>
+# Image name: [<registry>/]<namespace>/<image_name>:<image_tag>
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-IMAGE="$(python3 "$ROOT/scripts/render.py" --get image)"
+IMAGE="$(python3 "$ROOT/scripts/generate_manifests.py" --get image)"
 
 echo "Building $IMAGE"
 # linux/amd64: the cluster nodes are x86 even if you build on an Apple Silicon Mac.
