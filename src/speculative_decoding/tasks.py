@@ -29,7 +29,7 @@ def load_inputs(task: Task, num_examples: int) -> list[str]:
         dataset: IterableDataset = load_dataset("wmt/wmt14", "de-en", split="test", streaming=True)
         sources = (example["translation"]["en"] for example in dataset)
     else:
-        dataset: IterableDataset = load_dataset("abisee/cnn_dailymail", "3.1.0", split="test", streaming=True)
+        dataset: IterableDataset = load_dataset("abisee/cnn_dailymail", "3.0.0", split="test", streaming=True)
         sources = (example["article"] for example in dataset)
 
     return [prefix + source for source in islice(sources, num_examples)]
