@@ -4,6 +4,7 @@ This script replicates the experiment in "Fast Inference of Transformers via Spe
 """
 
 import json
+import logging
 from argparse import ArgumentParser, Namespace
 from dataclasses import asdict
 from pathlib import Path
@@ -80,11 +81,26 @@ def parse_arguments() -> Namespace:
         action="store_true",
         help="Preallocate the KV caches for the whole generation instead of growing them. Needs the KV cache.",
     )
+    argparser.add_argument(
+        "--compile",
+        choices=["eager", "default", "reduce-overhead"],
+        default=None,
+        help="Run the models through runners with static caches and padded inputs, and compile the decoding steps "
+        "with torch.compile in this mode. 'reduce-overhead' uses CUDA graphs. 'eager' runs the runners uncompiled. "
+        "Only for encoder-decoder models. Needs the KV cache.",
+    )
+    argparser.add_argument(
+        "--encoder-bucket",
+        type=int,
+        default=64,
+        help="With --compile, inputs are padded to a multiple of this length, and each length is compiled "
+        "separately. Default: 64",
+    )
     argparser.add_argument("--output", type=Path, default=None, help="Where to write the results as JSON.")
 
     args: Namespace = argparser.parse_args()
-    if args.static_cache and args.no_cache:
-        argparser.error("--static-cache needs the KV cache, so it can't be combined with --no-cache")
+    if (args.static_cache or args.compile) and args.no_cache:
+        argparser.error("--static-cache and --compile need the KV cache, so they can't be combined with --no-cache")
     return args
 
 
@@ -106,8 +122,11 @@ def pick_device() -> torch.device:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
+
     args: Namespace = parse_arguments()
     torch.manual_seed(args.seed)
+    torch.set_float32_matmul_precision("high")  # Allow TF32 tensor cores for float32 matmuls.
 
     device: torch.device = pick_device()
     dtype: torch.dtype = getattr(torch, args.dtype)
@@ -131,6 +150,8 @@ def main() -> None:
         run_baseline=not args.skip_baseline,
         use_cache=not args.no_cache,
         static_cache=args.static_cache,
+        compile_mode=args.compile,
+        encoder_bucket=args.encoder_bucket,
     )
 
     report: dict = {"task": args.task.value, "target": args.target, "draft": args.draft, "device": device.type}

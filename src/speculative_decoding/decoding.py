@@ -8,6 +8,7 @@ from typing import Self
 import torch
 from transformers import Cache, DynamicCache, EncoderDecoderCache, PreTrainedConfig, PreTrainedModel, StaticCache
 
+from .runner import ModelRunner, Slot
 from .sampling import speculative_sample, standardize
 
 
@@ -66,22 +67,36 @@ class DecoderState:
     many positions of the sequence, whose tensors are updated in place and never change shape. That is what lets the
     model step be compiled, since a growing cache changes the shapes of every call. Rolling a static cache back only
     resets its position counters, because the stale entries past the counters are masked out of attention.
+
+    Passing a `ModelRunner` in place of the model runs the steps through the runner, which keeps its static caches
+    between inputs and can compile the steps. The runner then decides the cache capacity.
     """
 
     def __init__(
-        self, model: PreTrainedModel, input_ids: torch.Tensor, use_cache: bool = True, capacity: int | None = None
+        self,
+        model: PreTrainedModel | ModelRunner,
+        input_ids: torch.Tensor,
+        use_cache: bool = True,
+        capacity: int | None = None,
     ) -> None:
         """
         Args:
-            model: The model to decode with. It must be in eval mode.
+            model: The model to decode with, which must be in eval mode, or a runner of the model.
             input_ids: The input (prompt) token ids, shape (1, input_len).
             use_cache: Whether to keep a KV cache. Without it every call re-processes the whole sequence.
             capacity: The number of sequence positions a static KV cache can hold, or None for a growing cache. The
-                sequence can never be longer than this, see `static_capacity`.
+                sequence can never be longer than this, see `static_capacity`. A runner brings its own capacity.
         """
 
+        self.runner: ModelRunner | None = model if isinstance(model, ModelRunner) else None
+        if self.runner is not None:
+            if capacity is not None:
+                raise ValueError("A runner has its own capacity")
+            model, capacity = self.runner.model, self.runner.capacity
         if capacity is not None and not use_cache:
             raise ValueError("A static cache needs use_cache=True")
+        if self.runner is not None and not use_cache:
+            raise ValueError("A runner needs use_cache=True")
 
         self.model: PreTrainedModel = model
         self.use_cache: bool = use_cache
@@ -90,15 +105,21 @@ class DecoderState:
         self.cached: int = 0  # The number of leading sequence positions the model has processed.
 
         self.encoder_outputs = None
-        if model.config.is_encoder_decoder:
-            self.encoder_outputs = model.get_encoder()(input_ids=input_ids)
+        self.slot: Slot | None = None
+        self.cache: Cache | None = None
+        if self.runner is not None:
+            # The runner encodes the input and owns the caches.
+            self.slot: Slot = self.runner.prepare(input_ids)
+            self.cache: EncoderDecoderCache = self.slot.cache
             initial: torch.Tensor = torch.tensor([model.config.decoder_start_token_id], device=self.device)
         else:
-            initial = input_ids[0]
-
-        self.cache: Cache | None = None
-        if use_cache:
-            self.cache = self._new_cache(model, capacity, input_ids.shape[1])
+            if model.config.is_encoder_decoder:
+                self.encoder_outputs = model.get_encoder()(input_ids=input_ids)
+                initial: torch.Tensor = torch.tensor([model.config.decoder_start_token_id], device=self.device)
+            else:
+                initial: torch.Tensor = input_ids[0]
+            if use_cache:
+                self.cache: EncoderDecoderCache = self._new_cache(model, capacity, input_ids.shape[1])
 
         self.length: int = len(initial)
         self.buffer: torch.Tensor = torch.empty((1, max(2 * self.length, 64)), dtype=torch.long, device=self.device)
@@ -191,7 +212,7 @@ class DecoderState:
 
         self.length = length
         if self.cached > length:
-            if self.cache is not None:
+            if self.cache is not None and self.runner is None:
                 if self.capacity is None:
                     # Cache.crop takes a negative number of tokens to remove.
                     self.cache.crop(length - self.cached)
@@ -209,6 +230,14 @@ class DecoderState:
 
         if self.capacity is not None and self.length > self.capacity:
             raise ValueError(f"The sequence has {self.length} positions, more than the static cache capacity")
+
+        if self.runner is not None:
+            # The runner is given the position, which discards whatever is cached past it.
+            logits: torch.Tensor = self.runner.forward(
+                self.slot, self.buffer[:, self.cached : self.length], self.cached
+            )
+            self.cached = self.length
+            return logits
 
         uncached: int = self.length - self.cached
         ids: torch.Tensor = (
@@ -231,7 +260,7 @@ class DecoderState:
 
 @torch.inference_mode()
 def autoregressive_decode(
-    model: PreTrainedModel,
+    model: PreTrainedModel | ModelRunner,
     input_ids: torch.Tensor,
     temperature: float,
     max_new_tokens: int,
@@ -244,7 +273,7 @@ def autoregressive_decode(
     Supports both encoder-decoder models (e.g. T5) and decoder-only models (e.g. GPT).
 
     Args:
-        model: The model to decode from. It must be in eval mode.
+        model: The model to decode from, which must be in eval mode, or a runner of the model.
         input_ids: The input (prompt) token ids, shape (1, input_len).
         temperature: The sampling temperature. 0 means argmax.
         max_new_tokens: The maximum number of tokens to generate.
@@ -256,7 +285,8 @@ def autoregressive_decode(
     """
 
     eos_token_id: int | None = model.config.eos_token_id
-    capacity: int | None = static_capacity(model, input_ids, max_new_tokens) if static_cache else None
+    use_static: bool = static_cache and not isinstance(model, ModelRunner)  # A runner brings its own static caches.
+    capacity: int | None = static_capacity(model, input_ids, max_new_tokens) if use_static else None
     state: DecoderState = DecoderState(model, input_ids, use_cache, capacity)
 
     for _ in range(max_new_tokens):
@@ -273,8 +303,8 @@ def autoregressive_decode(
 
 @torch.inference_mode()
 def speculative_decode(
-    target: PreTrainedModel,
-    draft: PreTrainedModel,
+    target: PreTrainedModel | ModelRunner,
+    draft: PreTrainedModel | ModelRunner,
     input_ids: torch.Tensor,
     temperature: float,
     gamma: int,
@@ -292,9 +322,12 @@ def speculative_decode(
 
     Both models must share a vocabulary, and may each be encoder-decoder or decoder-only.
 
+    With runners an iteration always drafts exactly `gamma` tokens, even near the token limit, and the surplus is cut
+    off afterwards. Fixed step lengths are what lets the steps be compiled.
+
     Args:
-        target: The large model whose distribution we want to sample from. It must be in eval mode.
-        draft: The small, fast approximation model. It must be in eval mode.
+        target: The large model whose distribution we want to sample from. It must be in eval mode. It can be a runner.
+        draft: The small, fast approximation model. It must be in eval mode. It can be a runner.
         input_ids: The input (prompt) token ids, shape (1, input_len).
         temperature: The sampling temperature, applied to both models. 0 means argmax.
         gamma: The number of tokens the draft model proposes per iteration.
@@ -306,21 +339,32 @@ def speculative_decode(
         The generated token ids (same convention as `autoregressive_decode`) and the decoding statistics.
     """
 
+    if isinstance(target, ModelRunner) != isinstance(draft, ModelRunner):
+        raise ValueError("Either both models or neither must be runners")
+    fixed_steps: bool = isinstance(target, ModelRunner)
+
     eos_token_id: int | None = target.config.eos_token_id
     # An iteration never feeds the models more than max_new_tokens positions past the start. The extra gamma + 1 is slack.
     extra: int = max_new_tokens + gamma + 1
     target_state: DecoderState = DecoderState(
-        target, input_ids, use_cache, static_capacity(target, input_ids, extra) if static_cache else None
+        target,
+        input_ids,
+        use_cache,
+        static_capacity(target, input_ids, extra) if static_cache and not fixed_steps else None,
     )
     draft_state: DecoderState = DecoderState(
-        draft, input_ids, use_cache, static_capacity(draft, input_ids, extra) if static_cache else None
+        draft,
+        input_ids,
+        use_cache,
+        static_capacity(draft, input_ids, extra) if static_cache and not fixed_steps else None,
     )
     stats: DecodingStats = DecodingStats()
     generated: list[int] = []
 
     while len(generated) < max_new_tokens:
-        # An iteration emits up to gamma + 1 tokens, so never draft more than what is still needed.
-        num_draft: int = min(gamma, max_new_tokens - len(generated) - 1)
+        # An iteration emits up to gamma + 1 tokens, so never draft more than what is still needed, unless the step
+        # lengths must stay fixed.
+        num_draft: int = gamma if fixed_steps else min(gamma, max_new_tokens - len(generated) - 1)
         verified: int = len(target_state)  # The length of the sequence both models agree on.
 
         # Sample num_draft guesses from the draft model autoregressively. The guesses stay on the device.
