@@ -3,6 +3,7 @@ This module contains the decoding algorithms.
 """
 
 from dataclasses import dataclass
+from typing import Self
 
 import torch
 from transformers import Cache, DynamicCache, EncoderDecoderCache, PreTrainedModel
@@ -30,7 +31,7 @@ class DecodingStats:
         evaluated: int = self.accepted + self.rejected
         return self.accepted / evaluated if evaluated else 0.0
 
-    def __iadd__(self, other: "DecodingStats") -> "DecodingStats":
+    def __iadd__(self, other: "DecodingStats") -> Self:
         self.iterations += other.iterations
         self.drafted += other.drafted
         self.accepted += other.accepted
@@ -48,6 +49,9 @@ class DecoderState:
     The cache may hold fewer positions than the sequence. `logits` feeds the model only the positions that aren't
     cached yet, so appending a token costs one position and not the whole sequence. `truncate` rolls the sequence, and
     the cache, back, which is what speculative decoding needs after a rejection.
+
+    The sequence lives in a buffer on the device, and only its length is kept on the CPU. A token sampled on the device
+    can then be appended and fed back to the model without the CPU waiting for the device to produce its value.
     """
 
     def __init__(self, model: PreTrainedModel, input_ids: torch.Tensor, use_cache: bool = True) -> None:
@@ -67,16 +71,49 @@ class DecoderState:
         self.encoder_outputs = None
         if model.config.is_encoder_decoder:
             self.encoder_outputs = model.get_encoder()(input_ids=input_ids)
-            self.tokens: list[int] = [model.config.decoder_start_token_id]
+            initial: torch.Tensor = torch.tensor([model.config.decoder_start_token_id], device=self.device)
         else:
-            self.tokens = input_ids[0].tolist()
-        self.start: int = len(self.tokens)
+            initial = input_ids[0]
+
+        self.length: int = len(initial)
+        self.buffer: torch.Tensor = torch.empty((1, max(2 * self.length, 64)), dtype=torch.long, device=self.device)
+        self.buffer[0, : self.length] = initial
+        self.start: int = self.length
 
     def __len__(self) -> int:
-        return len(self.tokens)
+        return self.length
 
-    def extend(self, tokens: list[int]) -> None:
-        self.tokens.extend(tokens)
+    @property
+    def tokens(self) -> list[int]:
+        """The sequence as a list. Copying it to the CPU waits for the device, so keep it out of the decoding loop."""
+        return self.buffer[0, : self.length].tolist()
+
+    @tokens.setter
+    def tokens(self, tokens: list[int]) -> None:
+        self.length = 0
+        self.extend(tokens)
+
+    def extend(self, tokens: list[int] | torch.Tensor) -> None:
+        """
+        Append tokens to the sequence.
+
+        Args:
+            tokens: The tokens, as a list or as a 1-D tensor. A tensor on the device is copied without waiting for it.
+        """
+
+        count: int = len(tokens)
+        if self.length + count > self.buffer.shape[1]:
+            grown: torch.Tensor = torch.empty((1, 2 * (self.length + count)), dtype=torch.long, device=self.device)
+            grown[0, : self.length] = self.buffer[0, : self.length]
+            self.buffer = grown
+
+        if isinstance(tokens, torch.Tensor):
+            self.buffer[0, self.length : self.length + count] = tokens
+        elif count == 1:
+            self.buffer[0, self.length] = tokens[0]  # A scalar is passed to the kernel, with no host-to-device copy.
+        else:
+            self.buffer[0, self.length : self.length + count] = torch.tensor(tokens)
+        self.length += count
 
     def truncate(self, length: int) -> None:
         """
@@ -86,7 +123,7 @@ class DecoderState:
             length: The new length of the sequence. Must be less than or equal to the current length.
         """
 
-        del self.tokens[length:]
+        self.length = length
         if self.cached > length:
             if self.cache is not None:
                 # Cache.crop takes a negative number of tokens to remove.
@@ -101,13 +138,11 @@ class DecoderState:
             The logits, shape (uncached_len, vocab_size). Row i predicts the token following uncached position i.
         """
 
-        uncached: int = len(self.tokens) - self.cached
-        if self.use_cache:
-            chunk: list[int] = self.tokens[self.cached :]
-        else:
-            chunk = self.tokens
+        uncached: int = self.length - self.cached
+        ids: torch.Tensor = (
+            self.buffer[:, self.cached : self.length] if self.use_cache else self.buffer[:, : self.length]
+        )
 
-        ids: torch.Tensor = torch.tensor([chunk], device=self.device)
         if self.encoder_outputs is not None:
             output = self.model(
                 encoder_outputs=self.encoder_outputs,
@@ -118,7 +153,7 @@ class DecoderState:
         else:
             output = self.model(input_ids=ids, past_key_values=self.cache, use_cache=self.use_cache)
 
-        self.cached = len(self.tokens)
+        self.cached = self.length
         return output.logits[0, -uncached:]
 
 
@@ -151,13 +186,14 @@ def autoregressive_decode(
 
     for _ in range(max_new_tokens):
         probs: torch.Tensor = standardize(state.logits()[-1], temperature)
-        token: int = int(torch.multinomial(probs, 1).item())
-        state.extend([token])
+        token: torch.Tensor = torch.multinomial(probs, 1)
+        state.extend(token)
 
-        if token == eos_token_id:
+        # Stopping at EOS needs the token on the CPU, so every step waits for the device, as Hugging Face does too.
+        if int(token.item()) == eos_token_id:
             break
 
-    return state.tokens[state.start :]
+    return state.buffer[0, state.start : state.length].tolist()
 
 
 @torch.inference_mode()
@@ -204,36 +240,33 @@ def speculative_decode(
         num_draft: int = min(gamma, max_new_tokens - len(generated) - 1)
         verified: int = len(target_state)  # The length of the sequence both models agree on.
 
-        # Sample num_draft guesses from the draft model autoregressively.
-        guesses: list[int] = []
-        draft_probs: list[torch.Tensor] = []
-        for _ in range(num_draft):
-            q: torch.Tensor = standardize(draft_state.logits()[-1], temperature)
-            guess: int = int(torch.multinomial(q, 1).item())
-            draft_probs.append(q)
-            guesses.append(guess)
-            draft_state.extend([guess])
+        # Sample num_draft guesses from the draft model autoregressively. The guesses stay on the device.
+        guesses: list[torch.Tensor] = []
+        draft_probs: torch.Tensor = torch.empty(
+            (num_draft, draft.config.vocab_size), dtype=draft.dtype, device=draft_state.device
+        )
+        for i in range(num_draft):
+            draft_probs[i] = standardize(draft_state.logits()[-1], temperature)
+            guesses.append(torch.multinomial(draft_probs[i], 1))
+            draft_state.extend(guesses[-1])
+        guess_ids: torch.Tensor = torch.cat(guesses) if guesses else draft_probs.new_empty(0, dtype=torch.long)
 
         # Run the target model once on everything it hasn't processed. The last num_draft + 1 rows are p_1 ... p_{n+1}.
-        target_state.extend(guesses)
+        target_state.extend(guess_ids)
         target_probs: torch.Tensor = standardize(target_state.logits()[-(num_draft + 1) :], temperature)
         stats.iterations += 1
         stats.drafted += num_draft
 
-        # Keep guesses until the first rejection, which is replaced by a token from the adjusted distribution.
-        new_tokens: list[int] = []
-        num_accepted: int = 0
-        for i, guess in enumerate(guesses):
-            token, accepted = speculative_sample(target_probs[i], draft_probs[i], guess)
-            new_tokens.append(token)
-            if not accepted:
-                stats.rejected += 1
-                break
-            num_accepted += 1
-        else:
-            # All guesses were accepted, so we get an extra token from the target for free.
-            new_tokens.append(int(torch.multinomial(target_probs[num_draft], 1).item()))
+        # Keep guesses until the first rejection, which is replaced by a token from the adjusted distribution. If all
+        # guesses were accepted we get an extra token from the target for free. This is the one place that waits for
+        # the device: the CPU needs the number of accepted guesses to know how far to roll back.
+        num_accepted_tensor, token = speculative_sample(target_probs, draft_probs, guess_ids)
+        *drafted_tokens, num_accepted, extra_token = torch.cat(
+            [guess_ids, num_accepted_tensor.view(1), token.view(1)]
+        ).tolist()
+        new_tokens: list[int] = drafted_tokens[:num_accepted] + [extra_token]
         stats.accepted += num_accepted
+        stats.rejected += num_accepted < num_draft
 
         # Stop at the first EOS and at the token limit.
         if eos_token_id is not None and eos_token_id in new_tokens:
@@ -247,6 +280,6 @@ def speculative_decode(
         # (or the extra token). The positions of the accepted guesses stay cached.
         for state in (target_state, draft_state):
             state.truncate(verified + num_accepted)
-            state.extend(new_tokens[num_accepted:])
+            state.extend([extra_token])
 
     return generated, stats

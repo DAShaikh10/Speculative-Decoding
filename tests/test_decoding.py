@@ -21,7 +21,9 @@ MAX_NEW_TOKENS: int = 20
 def test_autoregressive_decode_matches_huggingface_greedy_encoder_decoder() -> None:
     tokenizer = AutoTokenizer.from_pretrained("google-t5/t5-small")
     model = AutoModelForSeq2SeqLM.from_pretrained("google-t5/t5-small").eval()
-    input_ids: torch.Tensor = tokenizer("translate English to German: The house is wonderful.", return_tensors="pt").input_ids
+    input_ids: torch.Tensor = tokenizer(
+        "translate English to German: The house is wonderful.", return_tensors="pt"
+    ).input_ids
 
     ours: list[int] = autoregressive_decode(model, input_ids, temperature=0.0, max_new_tokens=MAX_NEW_TOKENS)
 
@@ -63,7 +65,9 @@ def test_speculative_decode_zero_temperature_equals_baseline(model_name: str, ga
     auto = AutoModelForSeq2SeqLM if "t5" in model_name else AutoModelForCausalLM
     target = auto.from_pretrained(model_name).eval()
     draft = random_copy(model_name, seed=0)
-    input_ids: torch.Tensor = tokenizer("translate English to German: The house is wonderful.", return_tensors="pt").input_ids
+    input_ids: torch.Tensor = tokenizer(
+        "translate English to German: The house is wonderful.", return_tensors="pt"
+    ).input_ids
 
     # The reference is the baseline without the KV cache, so that a cache bug cannot cancel out.
     expected: list[int] = autoregressive_decode(
@@ -99,7 +103,14 @@ def tiny_gpt(seed: int) -> GPT2LMHeadModel:
     """A tiny randomly initialised model over a 6 token vocabulary, with a non-uniform output distribution."""
     torch.manual_seed(seed)
     config = GPT2Config(
-        vocab_size=6, n_positions=16, n_embd=16, n_layer=1, n_head=2, initializer_range=0.8, bos_token_id=None, eos_token_id=None
+        vocab_size=6,
+        n_positions=16,
+        n_embd=16,
+        n_layer=1,
+        n_head=2,
+        initializer_range=0.8,
+        bos_token_id=None,
+        eos_token_id=None,
     )
     return GPT2LMHeadModel(config).eval()
 
@@ -143,7 +154,9 @@ def test_decoder_state_logits_match_uncached_after_rollback(model_name: str) -> 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     auto = AutoModelForSeq2SeqLM if "t5" in model_name else AutoModelForCausalLM
     model = auto.from_pretrained(model_name).eval()
-    input_ids: torch.Tensor = tokenizer("translate English to German: The house is wonderful.", return_tensors="pt").input_ids
+    input_ids: torch.Tensor = tokenizer(
+        "translate English to German: The house is wonderful.", return_tensors="pt"
+    ).input_ids
 
     with torch.inference_mode():
         cached: DecoderState = DecoderState(model, input_ids, use_cache=True)
@@ -168,7 +181,9 @@ def test_speculative_decode_cache_matches_no_cache_at_zero_temperature(model_nam
     auto = AutoModelForSeq2SeqLM if "t5" in model_name else AutoModelForCausalLM
     target = auto.from_pretrained(model_name).eval()
     draft = random_copy(model_name, seed=2)
-    input_ids: torch.Tensor = tokenizer("translate English to German: The house is wonderful.", return_tensors="pt").input_ids
+    input_ids: torch.Tensor = tokenizer(
+        "translate English to German: The house is wonderful.", return_tensors="pt"
+    ).input_ids
 
     cached, cached_stats = speculative_decode(target, draft, input_ids, 0.0, gamma=4, max_new_tokens=MAX_NEW_TOKENS)
     uncached, uncached_stats = speculative_decode(
