@@ -3,10 +3,12 @@ This module contains the decoding algorithms.
 """
 
 from dataclasses import dataclass
+from typing import Self
 
 import torch
-from transformers import Cache, DynamicCache, EncoderDecoderCache, PreTrainedModel
+from transformers import Cache, DynamicCache, EncoderDecoderCache, PreTrainedConfig, PreTrainedModel, StaticCache
 
+from .runner import ModelRunner, Slot
 from .sampling import speculative_sample, standardize
 
 
@@ -30,12 +32,21 @@ class DecodingStats:
         evaluated: int = self.accepted + self.rejected
         return self.accepted / evaluated if evaluated else 0.0
 
-    def __iadd__(self, other: "DecodingStats") -> "DecodingStats":
+    def __iadd__(self, other: "DecodingStats") -> Self:
         self.iterations += other.iterations
         self.drafted += other.drafted
         self.accepted += other.accepted
         self.rejected += other.rejected
         return self
+
+
+def static_capacity(model: PreTrainedModel, input_ids: torch.Tensor, extra_positions: int) -> int:
+    """
+    The capacity of a static KV cache that can hold the starting sequence plus `extra_positions` more positions.
+    """
+
+    start: int = 1 if model.config.is_encoder_decoder else input_ids.shape[1]
+    return start + extra_positions
 
 
 class DecoderState:
@@ -48,35 +59,148 @@ class DecoderState:
     The cache may hold fewer positions than the sequence. `logits` feeds the model only the positions that aren't
     cached yet, so appending a token costs one position and not the whole sequence. `truncate` rolls the sequence, and
     the cache, back, which is what speculative decoding needs after a rejection.
+
+    The sequence lives in a buffer on the device, and only its length is kept on the CPU. A token sampled on the device
+    can then be appended and fed back to the model without the CPU waiting for the device to produce its value.
+
+    By default the KV cache grows as positions are added. With `capacity` it is a static cache, preallocated for that
+    many positions of the sequence, whose tensors are updated in place and never change shape. That is what lets the
+    model step be compiled, since a growing cache changes the shapes of every call. Rolling a static cache back only
+    resets its position counters, because the stale entries past the counters are masked out of attention.
+
+    Passing a `ModelRunner` in place of the model runs the steps through the runner, which keeps its static caches
+    between inputs and can compile the steps. The runner then decides the cache capacity.
     """
 
-    def __init__(self, model: PreTrainedModel, input_ids: torch.Tensor, use_cache: bool = True) -> None:
+    def __init__(
+        self,
+        model: PreTrainedModel | ModelRunner,
+        input_ids: torch.Tensor,
+        use_cache: bool = True,
+        capacity: int | None = None,
+    ) -> None:
+        """
+        Args:
+            model: The model to decode with, which must be in eval mode, or a runner of the model.
+            input_ids: The input (prompt) token ids, shape (1, input_len).
+            use_cache: Whether to keep a KV cache. Without it every call re-processes the whole sequence.
+            capacity: The number of sequence positions a static KV cache can hold, or None for a growing cache. The
+                sequence can never be longer than this, see `static_capacity`. A runner brings its own capacity.
+        """
+
+        self.runner: ModelRunner | None = model if isinstance(model, ModelRunner) else None
+        if self.runner is not None:
+            if capacity is not None:
+                raise ValueError("A runner has its own capacity")
+            model, capacity = self.runner.model, self.runner.capacity
+        if capacity is not None and not use_cache:
+            raise ValueError("A static cache needs use_cache=True")
+        if self.runner is not None and not use_cache:
+            raise ValueError("A runner needs use_cache=True")
+
         self.model: PreTrainedModel = model
         self.use_cache: bool = use_cache
+        self.capacity: int | None = capacity
         self.device: torch.device = input_ids.device
         self.cached: int = 0  # The number of leading sequence positions the model has processed.
 
-        self.cache: Cache | None = None
-        if use_cache:
-            if model.config.is_encoder_decoder:
-                # The self-attention and cross-attention keys and values must be cached separately.
-                self.cache = EncoderDecoderCache(DynamicCache(config=model.config), DynamicCache(config=model.config))
-            else:
-                self.cache = DynamicCache(config=model.config)
-
         self.encoder_outputs = None
-        if model.config.is_encoder_decoder:
-            self.encoder_outputs = model.get_encoder()(input_ids=input_ids)
-            self.tokens: list[int] = [model.config.decoder_start_token_id]
+        self.slot: Slot | None = None
+        self.cache: Cache | None = None
+        if self.runner is not None:
+            # The runner encodes the input and owns the caches.
+            self.slot: Slot = self.runner.prepare(input_ids)
+            self.cache: EncoderDecoderCache = self.slot.cache
+            initial: torch.Tensor = torch.tensor([model.config.decoder_start_token_id], device=self.device)
         else:
-            self.tokens = input_ids[0].tolist()
-        self.start: int = len(self.tokens)
+            if model.config.is_encoder_decoder:
+                self.encoder_outputs = model.get_encoder()(input_ids=input_ids)
+                initial: torch.Tensor = torch.tensor([model.config.decoder_start_token_id], device=self.device)
+            else:
+                initial: torch.Tensor = input_ids[0]
+            if use_cache:
+                self.cache: EncoderDecoderCache = self._new_cache(model, capacity, input_ids.shape[1])
+
+        self.length: int = len(initial)
+        self.buffer: torch.Tensor = torch.empty((1, max(2 * self.length, 64)), dtype=torch.long, device=self.device)
+        self.buffer[0, : self.length] = initial
+        self.start: int = self.length
+
+    @staticmethod
+    def _new_cache(model: PreTrainedModel, capacity: int | None, encoder_length: int) -> Cache:
+        """
+        Create a new KV cache for the model, either static or dynamic.
+
+        Args:
+            model: The model to decode with.
+            capacity: The number of sequence positions a static KV cache can hold, or None for a growing cache.
+            encoder_length: The length of the encoder input.
+
+        Returns:
+            A new cache instance.
+        """
+
+        config: PreTrainedConfig = model.config
+        if capacity is None:
+            if config.is_encoder_decoder:
+                # The self-attention and cross-attention keys and values must be cached separately.
+                return EncoderDecoderCache(DynamicCache(config=config), DynamicCache(config=config))
+            return DynamicCache(config=config)
+
+        if config.is_encoder_decoder:
+            # The cross-attention cache holds the encoded input, so it is as long as the input.
+            return EncoderDecoderCache(
+                StaticCache(config=config, max_cache_len=capacity),
+                StaticCache(config=config, max_cache_len=encoder_length),
+            )
+        return StaticCache(config=config, max_cache_len=capacity)
+
+    def _rewind(self, length: int) -> None:
+        """
+        Roll a static cache back to `length` positions. Entries past it stay in memory but are masked out.
+
+        Args:
+            length: The new length of the sequence. Must be less than or equal to the current
+        """
+
+        cache: Cache = self.cache.self_attention_cache if isinstance(self.cache, EncoderDecoderCache) else self.cache
+        for layer in cache.layers:
+            layer.cumulative_length.fill_(length)
 
     def __len__(self) -> int:
-        return len(self.tokens)
+        return self.length
 
-    def extend(self, tokens: list[int]) -> None:
-        self.tokens.extend(tokens)
+    @property
+    def tokens(self) -> list[int]:
+        """The sequence as a list. Copying it to the CPU waits for the device, so keep it out of the decoding loop."""
+        return self.buffer[0, : self.length].tolist()
+
+    @tokens.setter
+    def tokens(self, tokens: list[int]) -> None:
+        self.length = 0
+        self.extend(tokens)
+
+    def extend(self, tokens: list[int] | torch.Tensor) -> None:
+        """
+        Append tokens to the sequence.
+
+        Args:
+            tokens: The tokens, as a list or as a 1-D tensor. A tensor on the device is copied without waiting for it.
+        """
+
+        count: int = len(tokens)
+        if self.length + count > self.buffer.shape[1]:
+            grown: torch.Tensor = torch.empty((1, 2 * (self.length + count)), dtype=torch.long, device=self.device)
+            grown[0, : self.length] = self.buffer[0, : self.length]
+            self.buffer = grown
+
+        if isinstance(tokens, torch.Tensor):
+            self.buffer[0, self.length : self.length + count] = tokens
+        elif count == 1:
+            self.buffer[0, self.length] = tokens[0]  # A scalar is passed to the kernel, with no host-to-device copy.
+        else:
+            self.buffer[0, self.length : self.length + count] = torch.tensor(tokens)
+        self.length += count
 
     def truncate(self, length: int) -> None:
         """
@@ -86,11 +210,14 @@ class DecoderState:
             length: The new length of the sequence. Must be less than or equal to the current length.
         """
 
-        del self.tokens[length:]
+        self.length = length
         if self.cached > length:
-            if self.cache is not None:
-                # Cache.crop takes a negative number of tokens to remove.
-                self.cache.crop(length - self.cached)
+            if self.cache is not None and self.runner is None:
+                if self.capacity is None:
+                    # Cache.crop takes a negative number of tokens to remove.
+                    self.cache.crop(length - self.cached)
+                else:
+                    self._rewind(length)
             self.cached = length
 
     def logits(self) -> torch.Tensor:
@@ -101,13 +228,22 @@ class DecoderState:
             The logits, shape (uncached_len, vocab_size). Row i predicts the token following uncached position i.
         """
 
-        uncached: int = len(self.tokens) - self.cached
-        if self.use_cache:
-            chunk: list[int] = self.tokens[self.cached :]
-        else:
-            chunk = self.tokens
+        if self.capacity is not None and self.length > self.capacity:
+            raise ValueError(f"The sequence has {self.length} positions, more than the static cache capacity")
 
-        ids: torch.Tensor = torch.tensor([chunk], device=self.device)
+        if self.runner is not None:
+            # The runner is given the position, which discards whatever is cached past it.
+            logits: torch.Tensor = self.runner.forward(
+                self.slot, self.buffer[:, self.cached : self.length], self.cached
+            )
+            self.cached = self.length
+            return logits
+
+        uncached: int = self.length - self.cached
+        ids: torch.Tensor = (
+            self.buffer[:, self.cached : self.length] if self.use_cache else self.buffer[:, : self.length]
+        )
+
         if self.encoder_outputs is not None:
             output = self.model(
                 encoder_outputs=self.encoder_outputs,
@@ -118,17 +254,18 @@ class DecoderState:
         else:
             output = self.model(input_ids=ids, past_key_values=self.cache, use_cache=self.use_cache)
 
-        self.cached = len(self.tokens)
+        self.cached = self.length
         return output.logits[0, -uncached:]
 
 
 @torch.inference_mode()
 def autoregressive_decode(
-    model: PreTrainedModel,
+    model: PreTrainedModel | ModelRunner,
     input_ids: torch.Tensor,
     temperature: float,
     max_new_tokens: int,
     use_cache: bool = True,
+    static_cache: bool = False,
 ) -> list[int]:
     """
     Standard autoregressive decoding with a single model, one token per model call. This is the baseline.
@@ -136,39 +273,44 @@ def autoregressive_decode(
     Supports both encoder-decoder models (e.g. T5) and decoder-only models (e.g. GPT).
 
     Args:
-        model: The model to decode from. It must be in eval mode.
+        model: The model to decode from, which must be in eval mode, or a runner of the model.
         input_ids: The input (prompt) token ids, shape (1, input_len).
         temperature: The sampling temperature. 0 means argmax.
         max_new_tokens: The maximum number of tokens to generate.
         use_cache: Whether to use the KV cache. Without it every call re-processes the whole sequence.
+        static_cache: Whether the KV cache is preallocated for the whole generation, instead of growing.
 
     Returns:
         The generated token ids, excluding the input and the decoder start token, including the EOS token if reached.
     """
 
     eos_token_id: int | None = model.config.eos_token_id
-    state: DecoderState = DecoderState(model, input_ids, use_cache)
+    use_static: bool = static_cache and not isinstance(model, ModelRunner)  # A runner brings its own static caches.
+    capacity: int | None = static_capacity(model, input_ids, max_new_tokens) if use_static else None
+    state: DecoderState = DecoderState(model, input_ids, use_cache, capacity)
 
     for _ in range(max_new_tokens):
         probs: torch.Tensor = standardize(state.logits()[-1], temperature)
-        token: int = int(torch.multinomial(probs, 1).item())
-        state.extend([token])
+        token: torch.Tensor = torch.multinomial(probs, 1)
+        state.extend(token)
 
-        if token == eos_token_id:
+        # Stopping at EOS needs the token on the CPU, so every step waits for the device, as Hugging Face does too.
+        if int(token.item()) == eos_token_id:
             break
 
-    return state.tokens[state.start :]
+    return state.buffer[0, state.start : state.length].tolist()
 
 
 @torch.inference_mode()
 def speculative_decode(
-    target: PreTrainedModel,
-    draft: PreTrainedModel,
+    target: PreTrainedModel | ModelRunner,
+    draft: PreTrainedModel | ModelRunner,
     input_ids: torch.Tensor,
     temperature: float,
     gamma: int,
     max_new_tokens: int,
     use_cache: bool = True,
+    static_cache: bool = False,
 ) -> tuple[list[int], DecodingStats]:
     """
     Speculative decoding (Algorithm 1 of the paper). The output follows the same distribution as `target` alone.
@@ -180,60 +322,78 @@ def speculative_decode(
 
     Both models must share a vocabulary, and may each be encoder-decoder or decoder-only.
 
+    With runners an iteration always drafts exactly `gamma` tokens, even near the token limit, and the surplus is cut
+    off afterwards. Fixed step lengths are what lets the steps be compiled.
+
     Args:
-        target: The large model whose distribution we want to sample from. It must be in eval mode.
-        draft: The small, fast approximation model. It must be in eval mode.
+        target: The large model whose distribution we want to sample from. It must be in eval mode. It can be a runner.
+        draft: The small, fast approximation model. It must be in eval mode. It can be a runner.
         input_ids: The input (prompt) token ids, shape (1, input_len).
         temperature: The sampling temperature, applied to both models. 0 means argmax.
         gamma: The number of tokens the draft model proposes per iteration.
         max_new_tokens: The maximum number of tokens to generate.
         use_cache: Whether to use the KV cache. Without it every call re-processes the whole sequence.
+        static_cache: Whether the KV caches are preallocated for the whole generation, instead of growing.
 
     Returns:
         The generated token ids (same convention as `autoregressive_decode`) and the decoding statistics.
     """
 
+    if isinstance(target, ModelRunner) != isinstance(draft, ModelRunner):
+        raise ValueError("Either both models or neither must be runners")
+    fixed_steps: bool = isinstance(target, ModelRunner)
+
     eos_token_id: int | None = target.config.eos_token_id
-    target_state: DecoderState = DecoderState(target, input_ids, use_cache)
-    draft_state: DecoderState = DecoderState(draft, input_ids, use_cache)
+    # An iteration never feeds the models more than max_new_tokens positions past the start. The extra gamma + 1 is slack.
+    extra: int = max_new_tokens + gamma + 1
+    target_state: DecoderState = DecoderState(
+        target,
+        input_ids,
+        use_cache,
+        static_capacity(target, input_ids, extra) if static_cache and not fixed_steps else None,
+    )
+    draft_state: DecoderState = DecoderState(
+        draft,
+        input_ids,
+        use_cache,
+        static_capacity(draft, input_ids, extra) if static_cache and not fixed_steps else None,
+    )
     stats: DecodingStats = DecodingStats()
     generated: list[int] = []
 
     while len(generated) < max_new_tokens:
-        # An iteration emits up to gamma + 1 tokens, so never draft more than what is still needed.
-        num_draft: int = min(gamma, max_new_tokens - len(generated) - 1)
+        # An iteration emits up to gamma + 1 tokens, so never draft more than what is still needed, unless the step
+        # lengths must stay fixed.
+        num_draft: int = gamma if fixed_steps else min(gamma, max_new_tokens - len(generated) - 1)
         verified: int = len(target_state)  # The length of the sequence both models agree on.
 
-        # Sample num_draft guesses from the draft model autoregressively.
-        guesses: list[int] = []
-        draft_probs: list[torch.Tensor] = []
-        for _ in range(num_draft):
-            q: torch.Tensor = standardize(draft_state.logits()[-1], temperature)
-            guess: int = int(torch.multinomial(q, 1).item())
-            draft_probs.append(q)
-            guesses.append(guess)
-            draft_state.extend([guess])
+        # Sample num_draft guesses from the draft model autoregressively. The guesses stay on the device.
+        guesses: list[torch.Tensor] = []
+        draft_probs: torch.Tensor = torch.empty(
+            (num_draft, draft.config.vocab_size), dtype=draft.dtype, device=draft_state.device
+        )
+        for i in range(num_draft):
+            draft_probs[i] = standardize(draft_state.logits()[-1], temperature)
+            guesses.append(torch.multinomial(draft_probs[i], 1))
+            draft_state.extend(guesses[-1])
+        guess_ids: torch.Tensor = torch.cat(guesses) if guesses else draft_probs.new_empty(0, dtype=torch.long)
 
         # Run the target model once on everything it hasn't processed. The last num_draft + 1 rows are p_1 ... p_{n+1}.
-        target_state.extend(guesses)
+        target_state.extend(guess_ids)
         target_probs: torch.Tensor = standardize(target_state.logits()[-(num_draft + 1) :], temperature)
         stats.iterations += 1
         stats.drafted += num_draft
 
-        # Keep guesses until the first rejection, which is replaced by a token from the adjusted distribution.
-        new_tokens: list[int] = []
-        num_accepted: int = 0
-        for i, guess in enumerate(guesses):
-            token, accepted = speculative_sample(target_probs[i], draft_probs[i], guess)
-            new_tokens.append(token)
-            if not accepted:
-                stats.rejected += 1
-                break
-            num_accepted += 1
-        else:
-            # All guesses were accepted, so we get an extra token from the target for free.
-            new_tokens.append(int(torch.multinomial(target_probs[num_draft], 1).item()))
+        # Keep guesses until the first rejection, which is replaced by a token from the adjusted distribution. If all
+        # guesses were accepted we get an extra token from the target for free. This is the one place that waits for
+        # the device: the CPU needs the number of accepted guesses to know how far to roll back.
+        num_accepted_tensor, token = speculative_sample(target_probs, draft_probs, guess_ids)
+        *drafted_tokens, num_accepted, extra_token = torch.cat(
+            [guess_ids, num_accepted_tensor.view(1), token.view(1)]
+        ).tolist()
+        new_tokens: list[int] = drafted_tokens[:num_accepted] + [extra_token]
         stats.accepted += num_accepted
+        stats.rejected += num_accepted < num_draft
 
         # Stop at the first EOS and at the token limit.
         if eos_token_id is not None and eos_token_id in new_tokens:
@@ -247,6 +407,6 @@ def speculative_decode(
         # (or the extra token). The positions of the accepted guesses stay cached.
         for state in (target_state, draft_state):
             state.truncate(verified + num_accepted)
-            state.extend(new_tokens[num_accepted:])
+            state.extend([extra_token])
 
     return generated, stats
