@@ -7,7 +7,8 @@ import time
 import torch
 from transformers import PreTrainedModel
 
-from .decoding import DecoderState
+from .decoding import DecoderState, static_capacity
+from .runner import ModelRunner
 
 
 def synchronize(device: torch.device) -> None:
@@ -42,11 +43,12 @@ def expected_speedup(alpha: float, gamma: int, c: float) -> float:
 
 @torch.inference_mode()
 def measure_cost_coefficient(
-    target: PreTrainedModel,
-    draft: PreTrainedModel,
+    target: PreTrainedModel | ModelRunner,
+    draft: PreTrainedModel | ModelRunner,
     input_ids: torch.Tensor,
     use_cache: bool = True,
-    repeats: int = 5,
+    repeats: int = 20,
+    static_cache: bool = False,
 ) -> float:
     """
     Definition 3.7: the ratio between the time of a single run of the draft model and of the target model.
@@ -56,8 +58,11 @@ def measure_cost_coefficient(
 
     device: torch.device = input_ids.device
 
-    def step_time(model: PreTrainedModel) -> float:
-        state: DecoderState = DecoderState(model, input_ids, use_cache)
+    def step_time(model: PreTrainedModel | ModelRunner) -> float:
+        capacity: int | None = (
+            static_capacity(model, input_ids, 2) if static_cache and not isinstance(model, ModelRunner) else None
+        )
+        state: DecoderState = DecoderState(model, input_ids, use_cache, capacity)
         state.logits()  # Process the input, which also warms up.
         length: int = len(state)
         synchronize(device)

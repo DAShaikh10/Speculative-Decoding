@@ -10,11 +10,13 @@ spec:
         runAsUser: 0 # Run Docker image as user root.
       containers:
         - name: speculative-decoding-translation
-          image: dashaikh10/overfitclub-speculative-decoding:latest
+          image: ${dockerhub_namespace}/overfitclub-speculative-decoding:latest
           # entrypoint.sh syncs the environment into the PVC, then runs these args.
           args:
             - python
             - evaluate.py
+            - --compile
+            - reduce-overhead
             - -d
             - ${draft_model_name}
             - -t
@@ -23,6 +25,7 @@ spec:
             - "7"
             - -k
             - translation
+            - --static-cache
             - --temperature
             - "0"
           env:
@@ -40,7 +43,7 @@ spec:
               memory: "64Gi"
               nvidia.com/gpu: "1"
       nodeSelector:
-        gpu: h200
+        gpu: ${gpu}
       restartPolicy: Never
 
       volumes:
