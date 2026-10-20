@@ -7,9 +7,14 @@ requires-python = ">=3.12"
 dependencies = [
     "datasets>=5.1.0",
     "sentencepiece>=0.2.2",
-    "torch>=2.14.1",
     "transformers>=5.20.1",
 ]
+
+# torch comes from an extra so the CUDA build can be picked: `uv sync --extra cu128` (Hopper/
+# Ampere/Blackwell) or `--extra cu126` (V100). Pinned to 2.7.1 to avoid issues on the RIS Cluster nodes.
+[project.optional-dependencies]
+cu126 = ["torch==2.7.1"]
+cu128 = ["torch==2.7.1"]
 
 [dependency-groups]
 dev = [
@@ -49,3 +54,22 @@ extend-select = ["I"] # Adds isort rules (I) to the default set (E, F)
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.uv]
+conflicts = [[{ extra = "cu126" }, { extra = "cu128" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu128", extra = "cu128" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

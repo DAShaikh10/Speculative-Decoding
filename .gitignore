@@ -10,6 +10,9 @@ wheels/
 # Secrets.
 config.json
 
+# Generated manifests (from k8s/*.yaml.tmpl).
+k8s/*.yaml
+
 # Miscellaneous.
 .DS_Store
 

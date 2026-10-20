@@ -1,5 +1,5 @@
 # T5 inference server (Deployment + Service).
-# Rendered from config.json by scripts/render.py, do not apply the .tmpl directly.
+# Rendered from `config.json` by `scripts/generate_manifests.py`, do not apply the .tmpl directly.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,7 +31,7 @@ spec:
             - containerPort: 8000
           env:
             - name: MODEL_NAME
-              value: "${model_name}"
+              value: "${draft_model_name}"
             - name: SERVED_MODEL_NAME
               value: "${served_model_name}"
             - name: DTYPE

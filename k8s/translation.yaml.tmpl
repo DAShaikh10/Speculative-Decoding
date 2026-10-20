@@ -1,0 +1,50 @@
+# Jobs are batch processing resources meant to run once or on a schedule.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: overfitclub-speculative-decoding-translation
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: 0 # Run Docker image as user root.
+      containers:
+        - name: speculative-decoding-translation
+          image: dashaikh10/overfitclub-speculative-decoding:latest
+          # entrypoint.sh syncs the environment into the PVC, then runs these args.
+          args:
+            - python
+            - evaluate.py
+            - -d
+            - ${draft_model_name}
+            - -t
+            - ${target_model_name}
+            - -g
+            - "7"
+            - -k
+            - translation
+            - --temperature
+            - "0"
+          env:
+            - name: TORCH_CUDA
+              value: "${torch_cuda}"
+          volumeMounts:
+            - name: ${pvc_name}
+              mountPath: /cache # Persistent volume claim for the venv, uv cache and HF weights (see entrypoint.sh).
+          resources:
+            requests:
+              cpu: "1"
+              memory: "48Gi"
+            limits:
+              cpu: "4"
+              memory: "64Gi"
+              nvidia.com/gpu: "1"
+      nodeSelector:
+        gpu: h200
+      restartPolicy: Never
+
+      volumes:
+        - name: ${pvc_name}
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+  backoffLimit: 2
