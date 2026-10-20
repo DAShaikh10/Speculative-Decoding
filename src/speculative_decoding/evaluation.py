@@ -25,6 +25,7 @@ class EvaluationResult:
     tokens_per_iteration: float  # The measured number of tokens produced per target model call.
     expected_tokens_per_iteration: float  # Equation (1) at the measured alpha.
     use_cache: bool
+    static_cache: bool
     cost_coefficient: float  # c, Definition 3.7.
     speculative_seconds: float
     baseline_seconds: float | None
@@ -52,6 +53,7 @@ def evaluate(
     max_input_length: int,
     run_baseline: bool = True,
     use_cache: bool = True,
+    static_cache: bool = False,
 ) -> EvaluationResult:
     """
     Run speculative decoding, and the baseline unless disabled, on every input with a batch size of 1.
@@ -66,10 +68,10 @@ def evaluate(
     ]
 
     # Warm up, and estimate the cost coefficient on the first input.
-    speculative_decode(target, draft, encoded[0], temperature, gamma, max_new_tokens, use_cache)
+    speculative_decode(target, draft, encoded[0], temperature, gamma, max_new_tokens, use_cache, static_cache)
     if run_baseline:
-        autoregressive_decode(target, encoded[0], temperature, max_new_tokens, use_cache)
-    cost_coefficient: float = measure_cost_coefficient(target, draft, encoded[0], use_cache)
+        autoregressive_decode(target, encoded[0], temperature, max_new_tokens, use_cache, static_cache)
+    cost_coefficient: float = measure_cost_coefficient(target, draft, encoded[0], use_cache, static_cache=static_cache)
 
     stats: DecodingStats = DecodingStats()
     generated_tokens: int = 0
@@ -80,7 +82,16 @@ def evaluate(
     for input_ids in encoded:
         # Run both decoders back to back on the same input, so that the ratio is not skewed by the machine state.
         (speculative_tokens, example_stats), seconds = _timed(
-            device, speculative_decode, target, draft, input_ids, temperature, gamma, max_new_tokens, use_cache
+            device,
+            speculative_decode,
+            target,
+            draft,
+            input_ids,
+            temperature,
+            gamma,
+            max_new_tokens,
+            use_cache,
+            static_cache,
         )
         speculative_seconds += seconds
         generated_tokens += len(speculative_tokens)
@@ -88,7 +99,7 @@ def evaluate(
 
         if run_baseline:
             baseline_tokens, seconds = _timed(
-                device, autoregressive_decode, target, input_ids, temperature, max_new_tokens, use_cache
+                device, autoregressive_decode, target, input_ids, temperature, max_new_tokens, use_cache, static_cache
             )
             baseline_seconds += seconds
             identical += baseline_tokens == speculative_tokens
@@ -102,6 +113,7 @@ def evaluate(
         tokens_per_iteration=generated_tokens / stats.iterations,
         expected_tokens_per_iteration=expected_tokens_per_iteration(alpha, gamma),
         use_cache=use_cache,
+        static_cache=static_cache,
         cost_coefficient=cost_coefficient,
         speculative_seconds=speculative_seconds,
         baseline_seconds=baseline_seconds if run_baseline else None,

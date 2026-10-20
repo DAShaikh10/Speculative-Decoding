@@ -75,9 +75,17 @@ def parse_arguments() -> Namespace:
     argparser.add_argument(
         "--no-cache", action="store_true", help="Disable the KV cache, so every call re-processes the whole sequence."
     )
+    argparser.add_argument(
+        "--static-cache",
+        action="store_true",
+        help="Preallocate the KV caches for the whole generation instead of growing them. Needs the KV cache.",
+    )
     argparser.add_argument("--output", type=Path, default=None, help="Where to write the results as JSON.")
 
-    return argparser.parse_args()
+    args: Namespace = argparser.parse_args()
+    if args.static_cache and args.no_cache:
+        argparser.error("--static-cache needs the KV cache, so it can't be combined with --no-cache")
+    return args
 
 
 def pick_device() -> torch.device:
@@ -122,6 +130,7 @@ def main() -> None:
         max_input_length=args.max_input_length,
         run_baseline=not args.skip_baseline,
         use_cache=not args.no_cache,
+        static_cache=args.static_cache,
     )
 
     report: dict = {"task": args.task.value, "target": args.target, "draft": args.draft, "device": device.type}

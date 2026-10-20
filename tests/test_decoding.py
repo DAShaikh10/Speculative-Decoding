@@ -192,3 +192,81 @@ def test_speculative_decode_cache_matches_no_cache_at_zero_temperature(model_nam
 
     assert cached == uncached
     assert cached_stats == uncached_stats
+
+
+MODELS: list[str] = ["google-t5/t5-small", "sshleifer/tiny-gpt2"]
+
+
+def load_model(model_name: str):
+    auto = AutoModelForSeq2SeqLM if "t5" in model_name else AutoModelForCausalLM
+    return auto.from_pretrained(model_name).eval()
+
+
+def example_input(model_name: str) -> torch.Tensor:
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    return tokenizer("translate English to German: The house is wonderful.", return_tensors="pt").input_ids
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_autoregressive_decode_static_cache_matches_growing_cache(model_name: str) -> None:
+    model = load_model(model_name)
+    input_ids: torch.Tensor = example_input(model_name)
+
+    growing: list[int] = autoregressive_decode(model, input_ids, 0.0, MAX_NEW_TOKENS)
+    static: list[int] = autoregressive_decode(model, input_ids, 0.0, MAX_NEW_TOKENS, static_cache=True)
+
+    assert static == growing
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("gamma", [1, 4])
+def test_speculative_decode_static_cache_equals_baseline_at_zero_temperature(model_name: str, gamma: int) -> None:
+    """With a bad draft model the static cache is rolled back often, which is where a cache bug would show."""
+    target = load_model(model_name)
+    draft = random_copy(model_name, seed=3)
+    input_ids: torch.Tensor = example_input(model_name)
+
+    expected: list[int] = autoregressive_decode(target, input_ids, 0.0, MAX_NEW_TOKENS, use_cache=False)
+    actual, stats = speculative_decode(target, draft, input_ids, 0.0, gamma, MAX_NEW_TOKENS, static_cache=True)
+    growing, growing_stats = speculative_decode(target, draft, input_ids, 0.0, gamma, MAX_NEW_TOKENS)
+
+    assert actual == expected
+    assert stats.accepted < stats.drafted
+    assert (actual, stats) == (growing, growing_stats)
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+def test_decoder_state_static_logits_match_uncached_after_rollback(model_name: str) -> None:
+    model = load_model(model_name)
+    input_ids: torch.Tensor = example_input(model_name)
+
+    with torch.inference_mode():
+        static: DecoderState = DecoderState(model, input_ids, capacity=input_ids.shape[1] + 16)
+        static.logits()
+        static.extend([5, 6, 7, 8])
+        static.logits()
+        static.truncate(len(static) - 3)  # Reject the last three tokens.
+        static.extend([9, 10])
+        actual: torch.Tensor = static.logits()
+
+        reference: DecoderState = DecoderState(model, input_ids, use_cache=False)
+        reference.tokens = list(static.tokens)
+        expected: torch.Tensor = reference.logits()[-actual.shape[0] :]
+
+    assert torch.allclose(actual, expected, atol=1e-3)
+    assert static.cache is not None and static.cache.get_seq_length() == len(static)
+
+
+def test_decoder_state_static_cache_rejects_a_sequence_longer_than_its_capacity() -> None:
+    model = load_model("sshleifer/tiny-gpt2")
+    input_ids: torch.Tensor = torch.tensor([[1, 2, 3]])
+    state: DecoderState = DecoderState(model, input_ids, capacity=5)
+    state.extend([4, 5, 6])
+    with pytest.raises(ValueError, match="capacity"), torch.inference_mode():
+        state.logits()
+
+
+def test_decoder_state_static_cache_needs_the_kv_cache() -> None:
+    model = load_model("sshleifer/tiny-gpt2")
+    with pytest.raises(ValueError):
+        DecoderState(model, torch.tensor([[1, 2, 3]]), use_cache=False, capacity=8)
