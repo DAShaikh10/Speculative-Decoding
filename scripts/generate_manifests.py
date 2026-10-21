@@ -25,6 +25,7 @@ REQUIRED: list[str] = [
     "image_tag",
     "gpu",
     "draft_model_name",
+    "target_model_name",
     "served_model_name",
     "dtype",
     "torch_cuda",
@@ -36,12 +37,24 @@ REQUIRED: list[str] = [
 ]
 
 
-def load_config(path: Path = ROOT / "config.json") -> dict:
+# Values of the job templates that config.json does not have to set. `--set key=value` overrides any value.
+DEFAULTS: dict[str, str] = {
+    "job_name": "overfitclub-speculative-decoding-dialogue",
+    "gamma": "5",
+    "temperature": "0",
+    "num_examples": "100",
+    "memory_limit": "96Gi",  # The weights go straight to the GPU, but the safetensors files are memory mapped.
+    "gpu_product": "",  # The `nvidia.com/gpu.product` node label, to tell GPUs of one `gpu` label apart (40GB/80GB A100).
+}
+
+
+def load_config(path: Path = ROOT / "config.json", overrides: dict[str, str] | None = None) -> dict:
     """
     Load the configuration from config.json.
 
     Args:
         path: The path to the config.json file.
+        overrides: Values that replace the ones of config.json and the defaults.
 
     Returns:
         A dictionary containing the configuration.
@@ -50,7 +63,7 @@ def load_config(path: Path = ROOT / "config.json") -> dict:
         SystemExit: If any required key is missing or empty.
     """
 
-    cfg = json.loads(path.read_text())
+    cfg = {**DEFAULTS, **json.loads(path.read_text()), **(overrides or {})}
     missing: list[str] = [k for k in REQUIRED if not cfg.get(k)]
     if missing:
         sys.exit(f"config.json is missing/empty: {', '.join(missing)}")
@@ -60,6 +73,16 @@ def load_config(path: Path = ROOT / "config.json") -> dict:
     registry: str = cfg.get("registry", "").strip().rstrip("/")
     prefix: str = f"{registry}/" if registry else ""
     cfg["image"] = f"{prefix}{cfg['namespace']}/{cfg['image_name']}:{cfg['image_tag']}"
+    # The image of the evaluation jobs, which is built from the Dockerfile in the repository root. It lives on Docker Hub
+    # when `dockerhub_namespace` is set, and in the same registry as the server image otherwise.
+    eval_image_name: str = "overfitclub-speculative-decoding:latest"
+    cfg["eval_image"] = (
+        f"{cfg['dockerhub_namespace']}/{eval_image_name}"
+        if cfg.get("dockerhub_namespace")
+        else f"{prefix}{cfg['namespace']}/{eval_image_name}"
+    )
+    # An empty line in the node selector when no GPU product is asked for.
+    cfg["gpu_product_selector"] = f"nvidia.com/gpu.product: {cfg['gpu_product']}" if cfg["gpu_product"] else ""
 
     return cfg
 
@@ -69,9 +92,12 @@ def main() -> None:
 
     argparser.add_argument("--templates", "-t", nargs="*", help="Template names (pvc, server); default: all")
     argparser.add_argument("--get", "-g", help="Print a single config/derived value and exit")
+    argparser.add_argument(
+        "--set", "-s", nargs="*", default=[], metavar="KEY=VALUE", help="Override values of config.json for this run"
+    )
 
     args: argparse.Namespace = argparser.parse_args()
-    config: dict = load_config()
+    config: dict = load_config(overrides=dict(item.split("=", 1) for item in args.set))
 
     if args.get:
         print(config[args.get])

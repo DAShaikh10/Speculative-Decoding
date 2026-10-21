@@ -6,13 +6,13 @@
   "image_tag": "latest",
   "gpu": "a100",
   "draft_model_name": "google-t5/t5-small",
-  "target_model_name": "google-t5/t5-11b"
+  "target_model_name": "google-t5/t5-11b",
   "served_model_name": "t5-small",
   "dtype": "float32",
   "torch_cuda": "cu128",
   "server_name": "t5-small-server",
   "pvc_name": "t5-model-cache",
-  "pvc_size": "20Gi",
+  "pvc_size": "300Gi",
   "storage_class": "shared",
   "access_mode": "ReadWriteMany",
   "image_pull_secret": "private-registry-auth"

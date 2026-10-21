@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedModel
 
 from speculative_decoding import Task
 from speculative_decoding.evaluation import EvaluationResult, evaluate
@@ -67,7 +67,8 @@ def parse_arguments() -> Namespace:
         "--dtype",
         choices=["float32", "bfloat16"],
         default="float32",
-        help="The model precision. T5 v1.1 overflows in float16. Default: float32",
+        help="The model precision. T5 v1.1 overflows in float16, use bfloat16 for large decoder-only models. "
+        "Default: float32",
     )
     argparser.add_argument("--seed", type=int, default=0, help="The random seed. Default: 0")
     argparser.add_argument(
@@ -87,7 +88,7 @@ def parse_arguments() -> Namespace:
         default=None,
         help="Run the models through runners with static caches and padded inputs, and compile the decoding steps "
         "with torch.compile in this mode. 'reduce-overhead' uses CUDA graphs. 'eager' runs the runners uncompiled. "
-        "Only for encoder-decoder models. Needs the KV cache.",
+        "Needs the KV cache.",
     )
     argparser.add_argument(
         "--encoder-bucket",
@@ -121,6 +122,16 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
+def load_model(name: str, dtype: torch.dtype, device: torch.device) -> PreTrainedModel:
+    """
+    Load a model onto the device, an encoder-decoder or a decoder-only one depending on its config.
+    """
+
+    config: AutoConfig = AutoConfig.from_pretrained(name)
+    auto = AutoModelForSeq2SeqLM if config.is_encoder_decoder else AutoModelForCausalLM
+    return auto.from_pretrained(name, dtype=dtype).to(device).eval()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
 
@@ -132,10 +143,12 @@ def main() -> None:
     dtype: torch.dtype = getattr(torch, args.dtype)
 
     tokenizer = AutoTokenizer.from_pretrained(args.target)
-    target = AutoModelForSeq2SeqLM.from_pretrained(args.target, dtype=dtype).to(device).eval()
-    draft = AutoModelForSeq2SeqLM.from_pretrained(args.draft, dtype=dtype).to(device).eval()
-    if target.config.vocab_size != draft.config.vocab_size:
+    if AutoTokenizer.from_pretrained(args.draft).get_vocab() != tokenizer.get_vocab():
         raise SystemExit("The draft and target models must share a vocabulary.")
+    target = load_model(args.target, dtype, device)
+    draft = load_model(args.draft, dtype, device)
+    if target.config.is_encoder_decoder != draft.config.is_encoder_decoder:
+        raise SystemExit("The draft and target models must both be encoder-decoder or both be decoder-only.")
 
     inputs: list[str] = load_inputs(args.task, args.num_examples)
     result: EvaluationResult = evaluate(

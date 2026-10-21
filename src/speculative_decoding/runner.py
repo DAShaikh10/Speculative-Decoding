@@ -41,7 +41,54 @@ class Slot:
     primed: bool = False  # Whether the cross-attention cache has been filled for the current input.
 
 
-class ModelRunner:
+class BaseRunner:
+    """
+    What the runners of encoder-decoder and decoder-only models share: the model, the cache capacity and the compiled
+    step. A subclass defines `_forward`, the decoding step that is compiled.
+    """
+
+    def __init__(
+        self, model: PreTrainedModel, capacity: int, compile_mode: str | None = None, backend: str = "inductor"
+    ) -> None:
+        """
+        Args:
+            model: The model to run, in eval mode.
+            capacity: The number of positions of the decoded sequence the KV cache holds.
+            compile_mode: The `mode` of `torch.compile`, such as "default" or "reduce-overhead", which uses CUDA graphs.
+                None runs the same steps without compiling them.
+            backend: The `torch.compile` backend. "inductor" is the real one, others are for testing the tracing.
+        """
+
+        self.model: PreTrainedModel = model
+        self.capacity: int = capacity
+        self.compile_mode: str | None = compile_mode
+
+        self._step: Callable = self._forward
+        if compile_mode is not None:
+            torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, MIN_RECOMPILE_LIMIT)
+            # The draft and the target run the same code with different constants, such as the attention scale of their
+            # head sizes. Dynamo would turn such a float into a symbolic one when it recompiles for the second model,
+            # and fail with "Data dependent operator". With the floats specialized each model gets its own graph.
+            torch._dynamo.config.specialize_float = True
+            options: dict = {"mode": compile_mode} if backend == "inductor" else {}
+            self._step = torch.compile(self._forward, fullgraph=True, dynamic=False, backend=backend, **options)
+
+        self._uses_cuda_graphs: bool = compile_mode == "reduce-overhead" and backend == "inductor"
+
+    @property
+    def config(self) -> PreTrainedConfig:
+        return self.model.config
+
+    @property
+    def generation_config(self):
+        return self.model.generation_config
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.model.dtype
+
+
+class ModelRunner(BaseRunner):
     """
     Runs the decoding steps of an encoder-decoder model on static caches, optionally compiled.
 
@@ -68,29 +115,11 @@ class ModelRunner:
         """
 
         if not model.config.is_encoder_decoder:
-            raise ValueError("The runner is only implemented for encoder-decoder models")
+            raise ValueError("ModelRunner is for encoder-decoder models, use DecoderOnlyRunner for decoder-only ones")
 
-        self.model: PreTrainedModel = model
-        self.capacity: int = capacity
-        self.compile_mode: str | None = compile_mode
+        super().__init__(model, capacity, compile_mode, backend)
         self.encoder_bucket: int = encoder_bucket
         self._slots: dict[int, Slot] = {}
-
-        self._step: Callable = self._forward
-        if compile_mode is not None:
-            torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, MIN_RECOMPILE_LIMIT)
-            options: dict = {"mode": compile_mode} if backend == "inductor" else {}
-            self._step = torch.compile(self._forward, fullgraph=True, dynamic=False, backend=backend, **options)
-
-        self._uses_cuda_graphs: bool = compile_mode == "reduce-overhead" and backend == "inductor"
-
-    @property
-    def config(self) -> PreTrainedConfig:
-        return self.model.config
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return self.model.dtype
 
     def bucket_for(self, input_length: int) -> int:
         """
@@ -262,3 +291,161 @@ class ModelRunner:
         slot: Slot = Slot(bucket, cache, encoder_hidden, mask, position)
         self._slots[bucket] = slot
         return slot
+
+
+@dataclass
+class DecoderOnlySlot:
+    """
+    What a compiled step of a decoder-only model needs to see unchanged between decoding runs.
+    """
+
+    cache: StaticCache
+    position: torch.Tensor  # The number of positions the cache holds, a scalar.
+    token_buffers: dict[int, torch.Tensor] = field(default_factory=dict)  # The step input, by number of tokens.
+
+
+class DecoderOnlyRunner(BaseRunner):
+    """
+    Runs the decoding steps of a decoder-only model on a static cache, optionally compiled.
+
+    There is no encoder and the cache does not depend on the length of the prompt, so a single slot serves every input.
+    The prompt is processed by `prefill`, which runs eagerly on the same cache: it is bound by arithmetic and not by
+    launch overhead, and it would need a compiled graph for every prompt length.
+
+    The runner can be passed wherever a model is accepted by the decoding functions.
+    """
+
+    def __init__(
+        self, model: PreTrainedModel, capacity: int, compile_mode: str | None = None, backend: str = "inductor"
+    ) -> None:
+        """
+        Args:
+            model: The model to run. It must be a decoder-only model in eval mode.
+            capacity: The number of positions, prompt included, the KV cache holds.
+            compile_mode: The `mode` of `torch.compile`, such as "default" or "reduce-overhead", which uses CUDA graphs.
+                None runs the same steps without compiling them.
+            backend: The `torch.compile` backend. "inductor" is the real one, others are for testing the tracing.
+        """
+
+        if model.config.is_encoder_decoder:
+            raise ValueError("DecoderOnlyRunner is for decoder-only models, use ModelRunner for encoder-decoder ones")
+
+        super().__init__(model, capacity, compile_mode, backend)
+        self._slot: DecoderOnlySlot | None = None
+
+    @torch.inference_mode()
+    def prepare(self, input_ids: torch.Tensor) -> DecoderOnlySlot:  # pylint: disable=unused-argument
+        """
+        Reset the cache, ready for a new prompt.
+
+        Args:
+            input_ids: The prompt token ids, shape (1, input_len). Unused, the cache does not depend on the prompt.
+
+        Returns:
+            The slot to pass to `prefill` and `forward`. It is reused by every input, so only one decoding run can use
+            it at a time.
+        """
+
+        slot: DecoderOnlySlot = self._slot or self._new_slot()
+        torch._foreach_zero_([layer.cumulative_length for layer in slot.cache.layers])
+        return slot
+
+    @torch.inference_mode()
+    def prefill(self, slot: DecoderOnlySlot, token_ids: torch.Tensor) -> None:
+        """
+        Process the first positions of the prompt, eagerly, filling the cache. The logits are not needed.
+
+        Args:
+            slot: The slot returned by `prepare`.
+            token_ids: The tokens to process, shape (1, num_tokens). They are the positions from 0 on.
+        """
+
+        torch._foreach_zero_([layer.cumulative_length for layer in slot.cache.layers])
+        self.model(input_ids=token_ids, past_key_values=slot.cache, use_cache=True, logits_to_keep=1)
+
+    @torch.inference_mode()
+    def forward(self, slot: DecoderOnlySlot, token_ids: torch.Tensor, position: int) -> torch.Tensor:
+        """
+        Run the model on new positions.
+
+        Args:
+            slot: The slot returned by `prepare`.
+            token_ids: The tokens to process, shape (1, num_tokens). They are the positions from `position` on.
+            position: The number of positions that are already cached. Anything cached past it is discarded.
+
+        Returns:
+            The logits of the new positions, shape (num_tokens, vocab_size). A compiled step may overwrite them on its
+            next call, so use them before calling `forward` again.
+        """
+
+        num_tokens: int = token_ids.shape[1]
+        buffer: torch.Tensor | None = slot.token_buffers.get(num_tokens)
+        if buffer is None:
+            buffer = torch.zeros((1, num_tokens), dtype=torch.long, device=slot.position.device)
+            torch._dynamo.mark_static_address(buffer)
+            slot.token_buffers[num_tokens] = buffer
+        buffer.copy_(token_ids)
+        slot.position.fill_(position)
+
+        if self._uses_cuda_graphs:
+            torch.compiler.cudagraph_mark_step_begin()
+        return self._step(buffer, slot.position, slot.cache)
+
+    @torch.inference_mode()
+    def warmup(self, input_ids: torch.Tensor, step_lengths: Iterable[int], repeats: int = 3) -> None:
+        """
+        Compile and record the graphs of the decoding steps, so that no compiling happens while timing.
+
+        Recording CUDA graphs takes a few calls, hence the repeats.
+
+        Args:
+            input_ids: An input to warm up with, shape (1, input_len). Only its device matters.
+            step_lengths: The numbers of tokens the decoding steps will be fed.
+            repeats: How many times to run each step length.
+        """
+
+        device: torch.device = input_ids.device
+        for num_tokens in sorted(set(step_lengths)):
+            if 2 * num_tokens > self.capacity:
+                raise ValueError(f"A step of {num_tokens} tokens does not fit twice in a capacity of {self.capacity}")
+            tokens: torch.Tensor = torch.zeros((1, num_tokens), dtype=torch.long, device=device)
+            for _ in range(repeats):
+                slot: DecoderOnlySlot = self.prepare(input_ids)
+                self.forward(slot, tokens, 0)
+                self.forward(slot, tokens, num_tokens)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        logger.info("Warmed up the decoder-only steps of %s tokens", sorted(set(step_lengths)))
+
+    def _forward(self, token_ids: torch.Tensor, position: torch.Tensor, cache: StaticCache) -> torch.Tensor:
+        """
+        The decoding step that is compiled. Everything it touches is passed in, so that it keeps the same identities.
+        """
+
+        # Roll the cache back or forward to `position`. Entries past it are masked out of attention.
+        for layer in cache.layers:
+            layer.cumulative_length.copy_(position)
+
+        output = self.model(input_ids=token_ids, past_key_values=cache, use_cache=True)
+        return output.logits[0]
+
+    def _new_slot(self) -> DecoderOnlySlot:
+        """
+        Create the slot, with a static cache and the position tensor.
+        """
+
+        config: PreTrainedConfig = self.config.get_text_config()
+        cache: StaticCache = StaticCache(config=config, max_cache_len=self.capacity)
+        # Allocate the cache tensors now. When they are allocated inside a compiled call they are not marked as static
+        # addresses, and CUDA graphs can't be used with them.
+        device: torch.device = self.model.device
+        head_dim: int = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        num_kv_heads: int = getattr(config, "num_key_value_heads", None) or config.num_attention_heads
+        cache.early_initialization(1, num_kv_heads, head_dim, self.model.dtype, device)
+
+        with torch.inference_mode():
+            position: torch.Tensor = torch.zeros((), dtype=torch.long, device=device)
+        torch._dynamo.mark_static_address(position)
+
+        self._slot = DecoderOnlySlot(cache, position)
+        return self._slot
