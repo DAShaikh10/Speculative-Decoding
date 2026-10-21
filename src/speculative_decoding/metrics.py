@@ -3,6 +3,7 @@ This module contains the theoretical formulas of the paper and the helpers to me
 """
 
 import time
+from dataclasses import dataclass
 
 import torch
 from transformers import PreTrainedModel
@@ -41,6 +42,98 @@ def expected_speedup(alpha: float, gamma: int, c: float) -> float:
     return expected_tokens_per_iteration(alpha, gamma) / (gamma * c + 1)
 
 
+@dataclass
+class StepTimes:
+    """
+    The time in seconds of single decoding steps, each measured on its own with the device synchronized around it.
+    """
+
+    draft: float  # One step of one token of the draft model.
+    target: float  # One step of one token of the target model.
+    verify: float  # One step of gamma + 1 tokens of the target model. Theorem 3.8 assumes it costs as much as `target`.
+    draft_loop: float | None  # The fused loop of gamma guesses of the draft model, if the draft is a runner.
+    encode: float  # Encoding the input with both models, paid once per input.
+
+    @property
+    def cost_coefficient(self) -> float:
+        """c, Definition 3.7."""
+        return self.draft / self.target
+
+
+@torch.inference_mode()
+def measure_step_times(
+    target: PreTrainedModel | BaseRunner,
+    draft: PreTrainedModel | BaseRunner,
+    input_ids: torch.Tensor,
+    gamma: int,
+    temperature: float = 0.0,
+    use_cache: bool = True,
+    repeats: int = 20,
+    static_cache: bool = False,
+    fuse_draft: bool = False,
+) -> StepTimes:
+    """
+    Time single decoding steps on the same input, after the input is processed. Run it apart from the benchmark, since
+    it synchronizes the device around every measurement.
+
+    Args:
+        gamma: The number of guesses, which sets the length of the verification step and of the fused loop.
+        fuse_draft: Whether to time the fused drafting loop too. The draft must be a runner that has it warmed up.
+    """
+
+    device: torch.device = input_ids.device
+
+    def step_time(model: PreTrainedModel | BaseRunner, num_tokens: int) -> float:
+        capacity: int | None = (
+            static_capacity(model, input_ids, num_tokens + 1)
+            if static_cache and not isinstance(model, BaseRunner)
+            else None
+        )
+        state: DecoderState = DecoderState(model, input_ids, use_cache, capacity)
+        state.logits()  # Process the input, which also warms up.
+        length: int = len(state)
+        synchronize(device)
+        begin: float = time.perf_counter()
+        for _ in range(repeats):
+            state.extend([0] * num_tokens)
+            state.logits()
+            state.truncate(length)
+        synchronize(device)
+        return (time.perf_counter() - begin) / repeats
+
+    def loop_time() -> float:
+        state: DecoderState = DecoderState(draft, input_ids, use_cache)
+        state.sample_guesses(gamma, temperature)  # Warms up the loop for this state.
+        synchronize(device)
+        begin: float = time.perf_counter()
+        for _ in range(repeats):
+            state.truncate(1)
+            state.cached = 0  # Feed the start token again, as at the start of a decoding run.
+            state.sample_guesses(gamma, temperature)
+        synchronize(device)
+        return (time.perf_counter() - begin) / repeats
+
+    def encode_time() -> float:
+        total: float = 0.0
+        for model in (draft, target):
+            DecoderState(model, input_ids, use_cache)  # Warms up.
+            synchronize(device)
+            begin: float = time.perf_counter()
+            for _ in range(repeats):
+                DecoderState(model, input_ids, use_cache)
+            synchronize(device)
+            total += (time.perf_counter() - begin) / repeats
+        return total
+
+    return StepTimes(
+        encode=encode_time(),
+        draft=step_time(draft, 1),
+        target=step_time(target, 1),
+        verify=step_time(target, gamma + 1),
+        draft_loop=loop_time() if fuse_draft else None,
+    )
+
+
 @torch.inference_mode()
 def measure_cost_coefficient(
     target: PreTrainedModel | BaseRunner,
@@ -56,22 +149,7 @@ def measure_cost_coefficient(
     Times one decoding step of each model on the same input, after the input is processed.
     """
 
-    device: torch.device = input_ids.device
-
-    def step_time(model: PreTrainedModel | BaseRunner) -> float:
-        capacity: int | None = (
-            static_capacity(model, input_ids, 2) if static_cache and not isinstance(model, BaseRunner) else None
-        )
-        state: DecoderState = DecoderState(model, input_ids, use_cache, capacity)
-        state.logits()  # Process the input, which also warms up.
-        length: int = len(state)
-        synchronize(device)
-        begin: float = time.perf_counter()
-        for _ in range(repeats):
-            state.extend([0])
-            state.logits()
-            state.truncate(length)
-        synchronize(device)
-        return (time.perf_counter() - begin) / repeats
-
-    return step_time(draft) / step_time(target)
+    times: StepTimes = measure_step_times(
+        target, draft, input_ids, gamma=1, use_cache=use_cache, repeats=repeats, static_cache=static_cache
+    )
+    return times.cost_coefficient

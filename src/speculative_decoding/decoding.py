@@ -22,6 +22,8 @@ class DecodingStats:
     drafted: int = 0  # The number of tokens proposed by the draft model.
     accepted: int = 0  # The number of draft tokens accepted by the target model.
     rejected: int = 0  # The number of draft tokens rejected by the target model.
+    beta_sum: float = 0.0  # The sum of sum_x min(p(x), q(x)) over the positions whose prefix is part of the output.
+    beta_count: int = 0  # The number of those positions.
 
     @property
     def acceptance_rate(self) -> float:
@@ -32,11 +34,21 @@ class DecodingStats:
         evaluated: int = self.accepted + self.rejected
         return self.accepted / evaluated if evaluated else 0.0
 
+    @property
+    def analytic_alpha(self) -> float:
+        """
+        The estimate of alpha of Corollary 3.6, the mean of sum_x min(p(x), q(x)), which is what the paper reports. Unlike
+        `acceptance_rate` it doesn't depend on the random draws of the acceptance test.
+        """
+        return self.beta_sum / self.beta_count if self.beta_count else 0.0
+
     def __iadd__(self, other: "DecodingStats") -> Self:
         self.iterations += other.iterations
         self.drafted += other.drafted
         self.accepted += other.accepted
         self.rejected += other.rejected
+        self.beta_sum += other.beta_sum
+        self.beta_count += other.beta_count
         return self
 
 
@@ -265,6 +277,29 @@ class DecoderState:
                     self._rewind(length)
             self.cached = length
 
+    def sample_guesses(self, num_guesses: int, temperature: float) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Sample `num_guesses` tokens from the model and append them to the sequence, in one call of the runner's drafting
+        loop. Like the loop of single steps it replaces, it leaves the last guess uncached.
+
+        Args:
+            num_guesses: How many tokens to sample.
+            temperature: The sampling temperature. 0 means argmax.
+
+        Returns:
+            The guesses, shape (num_guesses,), and the distributions they were sampled from, shape
+            (num_guesses, vocab_size), both on the device.
+        """
+
+        if self.runner is None:
+            raise ValueError("The drafting loop needs a runner")
+        guesses, probs = self.runner.draft_loop(
+            self.slot, self.buffer[:, self.cached : self.length], self.cached, num_guesses, temperature
+        )
+        self.cached = self.length + num_guesses - 1
+        self.extend(guesses)
+        return guesses, probs
+
     def logits(self) -> torch.Tensor:
         """
         Run the model on the positions that aren't cached yet.
@@ -359,6 +394,7 @@ def speculative_decode(
     use_cache: bool = True,
     static_cache: bool = False,
     vocab_size: int | None = None,
+    fuse_draft: bool = False,
 ) -> tuple[list[int], DecodingStats]:
     """
     Speculative decoding (Algorithm 1 of the paper). The output follows the same distribution as `target` alone.
@@ -384,6 +420,9 @@ def speculative_decode(
         static_cache: Whether the KV caches are preallocated for the whole generation, instead of growing.
         vocab_size: The number of leading logits both models sample from, or None for the smaller of their vocabularies.
             Both models must agree on the tokens, so it must not cover entries only one of them has.
+        fuse_draft: Whether the draft model samples all its guesses in a single call of its runner, which with CUDA
+            graphs is a single launch. Needs runners. The sampling then uses the exponential trick, so the random
+            draws differ from the unfused path, but the distribution is the same.
 
     Returns:
         The generated token ids (same convention as `autoregressive_decode`) and the decoding statistics.
@@ -392,6 +431,8 @@ def speculative_decode(
     if isinstance(target, BaseRunner) != isinstance(draft, BaseRunner):
         raise ValueError("Either both models or neither must be runners")
     fixed_steps: bool = isinstance(target, BaseRunner)
+    if fuse_draft and not fixed_steps:
+        raise ValueError("Fusing the drafting loop needs runners")
 
     eos_ids: set[int] = eos_token_ids(target)
     vocab_size = vocab_size or min(target.config.vocab_size, draft.config.vocab_size)
@@ -413,6 +454,8 @@ def speculative_decode(
     )
     stats: DecodingStats = DecodingStats()
     generated: list[int] = []
+    beta_sum: torch.Tensor = torch.zeros((), dtype=torch.float32, device=target_state.device)
+    beta_count: torch.Tensor = torch.zeros((), dtype=torch.long, device=target_state.device)
 
     while len(generated) < max_new_tokens:
         # An iteration emits up to gamma + 1 tokens, so never draft more than what is still needed, unless the step
@@ -421,13 +464,22 @@ def speculative_decode(
         verified: int = len(target_state)  # The length of the sequence both models agree on.
 
         # Sample num_draft guesses from the draft model autoregressively. The guesses stay on the device.
-        guesses: list[torch.Tensor] = []
-        draft_probs: torch.Tensor = torch.empty((num_draft, vocab_size), dtype=draft.dtype, device=draft_state.device)
-        for i in range(num_draft):
-            draft_probs[i] = standardize(draft_state.logits()[-1], temperature)
-            guesses.append(torch.multinomial(draft_probs[i], 1))
-            draft_state.extend(guesses[-1])
-        guess_ids: torch.Tensor = torch.cat(guesses) if guesses else draft_probs.new_empty(0, dtype=torch.long)
+        if fuse_draft:
+            guess_ids, draft_probs = draft_state.sample_guesses(num_draft, temperature)
+            if draft_probs.shape[-1] != vocab_size:
+                # The draft pads its output layer wider than the shared vocabulary.
+                draft_probs = draft_probs[:, :vocab_size]
+                draft_probs = draft_probs / draft_probs.sum(dim=-1, keepdim=True)
+        else:
+            guesses: list[torch.Tensor] = []
+            draft_probs: torch.Tensor = torch.empty(
+                (num_draft, vocab_size), dtype=draft.dtype, device=draft_state.device
+            )
+            for i in range(num_draft):
+                draft_probs[i] = standardize(draft_state.logits()[-1], temperature)
+                guesses.append(torch.multinomial(draft_probs[i], 1))
+                draft_state.extend(guesses[-1])
+            guess_ids: torch.Tensor = torch.cat(guesses) if guesses else draft_probs.new_empty(0, dtype=torch.long)
 
         # Run the target model once on everything it hasn't processed. The last num_draft + 1 rows are p_1 ... p_{n+1}.
         target_state.extend(guess_ids)
@@ -439,6 +491,13 @@ def speculative_decode(
         # guesses were accepted we get an extra token from the target for free. This is the one place that waits for
         # the device: the CPU needs the number of accepted guesses to know how far to roll back.
         num_accepted_tensor, token = speculative_sample(target_probs, draft_probs, guess_ids)
+
+        # Alpha of Corollary 3.6 is measured where the prefix is part of the output: the accepted guesses and the first
+        # rejected one, whose prefix is still the target's. It stays on the device until the end.
+        counted: torch.Tensor = torch.arange(num_draft, device=draft_state.device) <= num_accepted_tensor
+        beta: torch.Tensor = torch.minimum(target_probs[:num_draft], draft_probs).sum(dim=-1).float()
+        beta_sum += (beta * counted).sum()
+        beta_count += counted.sum()
         *drafted_tokens, num_accepted, extra_token = torch.cat(
             [guess_ids, num_accepted_tensor.view(1), token.view(1)]
         ).tolist()
@@ -461,4 +520,5 @@ def speculative_decode(
             state.truncate(verified + num_accepted)
             state.extend([extra_token])
 
+    stats.beta_sum, stats.beta_count = float(beta_sum.item()), int(beta_count.item())
     return generated, stats

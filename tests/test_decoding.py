@@ -89,6 +89,20 @@ def test_speculative_decode_identical_draft_accepts_everything() -> None:
     assert len(tokens) <= 16
 
 
+def test_analytic_alpha_of_an_identical_draft_is_one_and_of_a_bad_draft_is_lower() -> None:
+    """Corollary 3.6: sum_x min(p, q) is 1 when the models agree, and falls as they differ."""
+    target = AutoModelForCausalLM.from_pretrained("sshleifer/tiny-gpt2").eval()
+    draft = random_copy("sshleifer/tiny-gpt2", seed=1)
+    input_ids: torch.Tensor = torch.tensor([[1, 2, 3]])
+
+    _, same = speculative_decode(target, target, input_ids, temperature=1.0, gamma=4, max_new_tokens=16)
+    _, different = speculative_decode(target, draft, input_ids, temperature=1.0, gamma=4, max_new_tokens=16)
+
+    assert same.beta_count > 0
+    assert same.analytic_alpha == pytest.approx(1.0, abs=1e-3)
+    assert 0 <= different.analytic_alpha < same.analytic_alpha
+
+
 @pytest.mark.parametrize("temperature", [0.0, 1.0])
 def test_speculative_decode_respects_max_new_tokens(temperature: float) -> None:
     target = AutoModelForCausalLM.from_pretrained("sshleifer/tiny-gpt2").eval()

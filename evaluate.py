@@ -59,9 +59,20 @@ def parse_arguments() -> Namespace:
         help="The temperature for sampling from both the draft and target models.",
     )
     argparser.add_argument(
-        "--num-examples", default=100, type=int, help="The number of test inputs to decode. Default: 100"
+        "--num-examples",
+        default=1000,
+        type=int,
+        help="The pool of test inputs, of which --min-generated-tokens decodes as many as it needs. Every input "
+        "length bucket in the pool is compiled up front, so keep it small. Default: 1000",
     )
-    argparser.add_argument("--max-new-tokens", type=int, default=128, help="The generation limit. Default: 128")
+    argparser.add_argument(
+        "--min-generated-tokens",
+        default=10_000,
+        type=int,
+        help="Stop after the input that brings the generated tokens to this many. The paper measures alpha on 10K "
+        "tokens. 0 decodes every input. Default: 10000",
+    )
+    argparser.add_argument("--max-new-tokens", type=int, default=512, help="The generation limit. Default: 512")
     argparser.add_argument("--max-input-length", type=int, default=512, help="The input truncation. Default: 512")
     argparser.add_argument(
         "--dtype",
@@ -97,11 +108,19 @@ def parse_arguments() -> Namespace:
         help="With --compile, inputs are padded to a multiple of this length, and each length is compiled "
         "separately. Default: 64",
     )
+    argparser.add_argument(
+        "--fuse-draft",
+        action="store_true",
+        help="Sample all the guesses of the draft model in one call of its runner, which is one CUDA graph launch with "
+        "--compile reduce-overhead. Needs --compile.",
+    )
     argparser.add_argument("--output", type=Path, default=None, help="Where to write the results as JSON.")
 
     args: Namespace = argparser.parse_args()
     if (args.static_cache or args.compile) and args.no_cache:
         argparser.error("--static-cache and --compile need the KV cache, so they can't be combined with --no-cache")
+    if args.fuse_draft and not args.compile:
+        argparser.error("--fuse-draft needs --compile")
     return args
 
 
@@ -165,9 +184,20 @@ def main() -> None:
         static_cache=args.static_cache,
         compile_mode=args.compile,
         encoder_bucket=args.encoder_bucket,
+        min_generated_tokens=args.min_generated_tokens or None,
+        fuse_draft=args.fuse_draft,
     )
 
-    report: dict = {"task": args.task.value, "target": args.target, "draft": args.draft, "device": device.type}
+    report: dict = {
+        "task": args.task.value,
+        "target": args.target,
+        "draft": args.draft,
+        "device": device.type,
+        "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        "dtype": args.dtype,
+        "max_new_tokens": args.max_new_tokens,
+        "min_generated_tokens": args.min_generated_tokens,
+    }
     report.update(asdict(result))
     print(json.dumps(report, indent=2))
     if args.output is not None:
