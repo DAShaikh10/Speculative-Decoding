@@ -21,3 +21,4 @@ results/
 
 # Virtual environments.
 .venv
+.myvenv
