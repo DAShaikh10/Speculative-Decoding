@@ -1,0 +1,68 @@
+# Speculative decoding of a decoder-only target (e.g. Qwen2.5-32B-Instruct) on chat prompts, the counterpart of the
+# paper's LaMDA dialog experiment. The target and draft come from `config.json`, the rest has defaults in
+# `scripts/generate_manifests.py` that `--set key=value` overrides. Rendered with:
+#   python3 scripts/generate_manifests.py --templates dialogue --set job_name=... --set gpu_product=...
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${job_name}
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: ${image_pull_secret}
+      securityContext:
+        runAsUser: 0 # Run Docker image as user root.
+      containers:
+        - name: speculative-decoding-dialogue
+          image: ${dockerhub_namespace}/overfitclub-speculative-decoding:latest
+          imagePullPolicy: Always
+          # entrypoint.sh syncs the environment into the PVC, then runs these args.
+          args:
+            - python
+            - evaluate.py
+            - --compile
+            - reduce-overhead
+            - --static-cache
+            - --dtype
+            - bfloat16
+            - -d
+            - ${draft_model_name}
+            - -t
+            - ${target_model_name}
+            - -g
+            - "${gamma}"
+            - -k
+            - dialogue
+            - --temperature
+            - "${temperature}"
+            - --num-examples
+            - "${num_examples}"
+            - --output
+            - /cache/results/${job_name}.json
+          env:
+            - name: TORCH_CUDA
+              value: "${torch_cuda}"
+            - name: HF_HUB_DISABLE_XET # The xet downloader drops large transfers sometimes, plain HTTP is steadier.
+              value: "1"
+          volumeMounts:
+            - name: ${pvc_name}
+              mountPath: /cache # Persistent volume claim for the venv, uv cache, HF weights and results (see entrypoint.sh).
+          resources:
+            requests:
+              cpu: "1"
+              memory: "48Gi"
+            limits:
+              cpu: "4"
+              memory: "${memory_limit}"
+              nvidia.com/gpu: "1"
+      nodeSelector:
+        gpu: ${gpu}
+        ${gpu_product_selector}
+      restartPolicy: Never
+
+      volumes:
+        - name: ${pvc_name}
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+  backoffLimit: 0

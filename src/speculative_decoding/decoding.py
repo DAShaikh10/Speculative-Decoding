@@ -8,7 +8,7 @@ from typing import Self
 import torch
 from transformers import Cache, DynamicCache, EncoderDecoderCache, PreTrainedConfig, PreTrainedModel, StaticCache
 
-from .runner import ModelRunner, Slot
+from .runner import BaseRunner
 from .sampling import speculative_sample, standardize
 
 
@@ -49,6 +49,20 @@ def static_capacity(model: PreTrainedModel, input_ids: torch.Tensor, extra_posit
     return start + extra_positions
 
 
+def eos_token_ids(model: PreTrainedModel | BaseRunner) -> set[int]:
+    """
+    The token ids that end a generation. Chat models have several, such as Qwen's <|im_end|> and <|endoftext|>, which
+    the generation config lists and the model config often does not.
+    """
+
+    eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    if eos is None:
+        eos = model.config.eos_token_id
+    if eos is None:
+        return set()
+    return {eos} if isinstance(eos, int) else set(eos)
+
+
 class DecoderState:
     """
     The decoding state of one model: the token sequence being decoded, and the KV cache of its prefix.
@@ -68,16 +82,25 @@ class DecoderState:
     model step be compiled, since a growing cache changes the shapes of every call. Rolling a static cache back only
     resets its position counters, because the stale entries past the counters are masked out of attention.
 
-    Passing a `ModelRunner` in place of the model runs the steps through the runner, which keeps its static caches
-    between inputs and can compile the steps. The runner then decides the cache capacity.
+    Passing a runner (`ModelRunner` or `DecoderOnlyRunner`) in place of the model runs the steps through the runner,
+    which keeps its static caches between inputs and can compile the steps. The runner then decides the cache capacity.
+
+    A decoder-only model processes all of the prompt but its last token right away (the prefill), and keeps the last
+    token as the start of the sequence. This is the counterpart of the decoder start token of an encoder-decoder
+    model, so that every later step has the same length for both kinds of model.
+
+    With `vocab_size` the logits are cut to the first `vocab_size` entries. Models of one family can pad their output
+    layer to different sizes (Qwen2.5-0.5B has 151936 entries and Qwen2.5-32B 152064), whereas speculative decoding needs
+    both models to have a distribution over the same tokens.
     """
 
     def __init__(
         self,
-        model: PreTrainedModel | ModelRunner,
+        model: PreTrainedModel | BaseRunner,
         input_ids: torch.Tensor,
         use_cache: bool = True,
         capacity: int | None = None,
+        vocab_size: int | None = None,
     ) -> None:
         """
         Args:
@@ -86,9 +109,10 @@ class DecoderState:
             use_cache: Whether to keep a KV cache. Without it every call re-processes the whole sequence.
             capacity: The number of sequence positions a static KV cache can hold, or None for a growing cache. The
                 sequence can never be longer than this, see `static_capacity`. A runner brings its own capacity.
+            vocab_size: The number of leading logits that are kept, or None to keep them all.
         """
 
-        self.runner: ModelRunner | None = model if isinstance(model, ModelRunner) else None
+        self.runner: BaseRunner | None = model if isinstance(model, BaseRunner) else None
         if self.runner is not None:
             if capacity is not None:
                 raise ValueError("A runner has its own capacity")
@@ -103,15 +127,19 @@ class DecoderState:
         self.capacity: int | None = capacity
         self.device: torch.device = input_ids.device
         self.cached: int = 0  # The number of leading sequence positions the model has processed.
+        self.vocab_size: int = vocab_size or model.config.vocab_size
 
         self.encoder_outputs = None
-        self.slot: Slot | None = None
+        self.slot = None
         self.cache: Cache | None = None
         if self.runner is not None:
             # The runner encodes the input and owns the caches.
-            self.slot: Slot = self.runner.prepare(input_ids)
-            self.cache: EncoderDecoderCache = self.slot.cache
-            initial: torch.Tensor = torch.tensor([model.config.decoder_start_token_id], device=self.device)
+            self.slot = self.runner.prepare(input_ids)
+            self.cache = self.slot.cache
+            if model.config.is_encoder_decoder:
+                initial: torch.Tensor = torch.tensor([model.config.decoder_start_token_id], device=self.device)
+            else:
+                initial: torch.Tensor = input_ids[0]
         else:
             if model.config.is_encoder_decoder:
                 self.encoder_outputs = model.get_encoder()(input_ids=input_ids)
@@ -119,12 +147,29 @@ class DecoderState:
             else:
                 initial: torch.Tensor = input_ids[0]
             if use_cache:
-                self.cache: EncoderDecoderCache = self._new_cache(model, capacity, input_ids.shape[1])
+                self.cache = self._new_cache(model, capacity, input_ids.shape[1])
 
         self.length: int = len(initial)
         self.buffer: torch.Tensor = torch.empty((1, max(2 * self.length, 64)), dtype=torch.long, device=self.device)
         self.buffer[0, : self.length] = initial
         self.start: int = self.length
+
+        if not model.config.is_encoder_decoder and use_cache:
+            self._prefill()
+
+    def _prefill(self) -> None:
+        """
+        Process all of a decoder-only prompt but its last token, which is kept as the start of the sequence.
+        """
+
+        if self.length <= 1:
+            return
+        prompt: torch.Tensor = self.buffer[:, : self.length - 1]
+        if self.runner is not None:
+            self.runner.prefill(self.slot, prompt)
+        else:
+            self.model(input_ids=prompt, past_key_values=self.cache, use_cache=True, logits_to_keep=1)
+        self.cached = self.length - 1
 
     @staticmethod
     def _new_cache(model: PreTrainedModel, capacity: int | None, encoder_length: int) -> Cache:
@@ -237,7 +282,7 @@ class DecoderState:
                 self.slot, self.buffer[:, self.cached : self.length], self.cached
             )
             self.cached = self.length
-            return logits
+            return logits[..., : self.vocab_size]
 
         uncached: int = self.length - self.cached
         ids: torch.Tensor = (
@@ -255,17 +300,18 @@ class DecoderState:
             output = self.model(input_ids=ids, past_key_values=self.cache, use_cache=self.use_cache)
 
         self.cached = self.length
-        return output.logits[0, -uncached:]
+        return output.logits[0, -uncached:, : self.vocab_size]
 
 
 @torch.inference_mode()
 def autoregressive_decode(
-    model: PreTrainedModel | ModelRunner,
+    model: PreTrainedModel | BaseRunner,
     input_ids: torch.Tensor,
     temperature: float,
     max_new_tokens: int,
     use_cache: bool = True,
     static_cache: bool = False,
+    vocab_size: int | None = None,
 ) -> list[int]:
     """
     Standard autoregressive decoding with a single model, one token per model call. This is the baseline.
@@ -279,15 +325,16 @@ def autoregressive_decode(
         max_new_tokens: The maximum number of tokens to generate.
         use_cache: Whether to use the KV cache. Without it every call re-processes the whole sequence.
         static_cache: Whether the KV cache is preallocated for the whole generation, instead of growing.
+        vocab_size: The number of leading logits to sample from, or None for all of them.
 
     Returns:
         The generated token ids, excluding the input and the decoder start token, including the EOS token if reached.
     """
 
-    eos_token_id: int | None = model.config.eos_token_id
-    use_static: bool = static_cache and not isinstance(model, ModelRunner)  # A runner brings its own static caches.
+    eos_ids: set[int] = eos_token_ids(model)
+    use_static: bool = static_cache and not isinstance(model, BaseRunner)  # A runner brings its own static caches.
     capacity: int | None = static_capacity(model, input_ids, max_new_tokens) if use_static else None
-    state: DecoderState = DecoderState(model, input_ids, use_cache, capacity)
+    state: DecoderState = DecoderState(model, input_ids, use_cache, capacity, vocab_size)
 
     for _ in range(max_new_tokens):
         probs: torch.Tensor = standardize(state.logits()[-1], temperature)
@@ -295,7 +342,7 @@ def autoregressive_decode(
         state.extend(token)
 
         # Stopping at EOS needs the token on the CPU, so every step waits for the device, as Hugging Face does too.
-        if int(token.item()) == eos_token_id:
+        if int(token.item()) in eos_ids:
             break
 
     return state.buffer[0, state.start : state.length].tolist()
@@ -303,14 +350,15 @@ def autoregressive_decode(
 
 @torch.inference_mode()
 def speculative_decode(
-    target: PreTrainedModel | ModelRunner,
-    draft: PreTrainedModel | ModelRunner,
+    target: PreTrainedModel | BaseRunner,
+    draft: PreTrainedModel | BaseRunner,
     input_ids: torch.Tensor,
     temperature: float,
     gamma: int,
     max_new_tokens: int,
     use_cache: bool = True,
     static_cache: bool = False,
+    vocab_size: int | None = None,
 ) -> tuple[list[int], DecodingStats]:
     """
     Speculative decoding (Algorithm 1 of the paper). The output follows the same distribution as `target` alone.
@@ -334,16 +382,19 @@ def speculative_decode(
         max_new_tokens: The maximum number of tokens to generate.
         use_cache: Whether to use the KV cache. Without it every call re-processes the whole sequence.
         static_cache: Whether the KV caches are preallocated for the whole generation, instead of growing.
+        vocab_size: The number of leading logits both models sample from, or None for the smaller of their vocabularies.
+            Both models must agree on the tokens, so it must not cover entries only one of them has.
 
     Returns:
         The generated token ids (same convention as `autoregressive_decode`) and the decoding statistics.
     """
 
-    if isinstance(target, ModelRunner) != isinstance(draft, ModelRunner):
+    if isinstance(target, BaseRunner) != isinstance(draft, BaseRunner):
         raise ValueError("Either both models or neither must be runners")
-    fixed_steps: bool = isinstance(target, ModelRunner)
+    fixed_steps: bool = isinstance(target, BaseRunner)
 
-    eos_token_id: int | None = target.config.eos_token_id
+    eos_ids: set[int] = eos_token_ids(target)
+    vocab_size = vocab_size or min(target.config.vocab_size, draft.config.vocab_size)
     # An iteration never feeds the models more than max_new_tokens positions past the start. The extra gamma + 1 is slack.
     extra: int = max_new_tokens + gamma + 1
     target_state: DecoderState = DecoderState(
@@ -351,12 +402,14 @@ def speculative_decode(
         input_ids,
         use_cache,
         static_capacity(target, input_ids, extra) if static_cache and not fixed_steps else None,
+        vocab_size,
     )
     draft_state: DecoderState = DecoderState(
         draft,
         input_ids,
         use_cache,
         static_capacity(draft, input_ids, extra) if static_cache and not fixed_steps else None,
+        vocab_size,
     )
     stats: DecodingStats = DecodingStats()
     generated: list[int] = []
@@ -369,9 +422,7 @@ def speculative_decode(
 
         # Sample num_draft guesses from the draft model autoregressively. The guesses stay on the device.
         guesses: list[torch.Tensor] = []
-        draft_probs: torch.Tensor = torch.empty(
-            (num_draft, draft.config.vocab_size), dtype=draft.dtype, device=draft_state.device
-        )
+        draft_probs: torch.Tensor = torch.empty((num_draft, vocab_size), dtype=draft.dtype, device=draft_state.device)
         for i in range(num_draft):
             draft_probs[i] = standardize(draft_state.logits()[-1], temperature)
             guesses.append(torch.multinomial(draft_probs[i], 1))
@@ -396,11 +447,12 @@ def speculative_decode(
         stats.rejected += num_accepted < num_draft
 
         # Stop at the first EOS and at the token limit.
-        if eos_token_id is not None and eos_token_id in new_tokens:
-            new_tokens = new_tokens[: new_tokens.index(eos_token_id) + 1]
+        first_eos: int | None = next((i for i, token_id in enumerate(new_tokens) if token_id in eos_ids), None)
+        if first_eos is not None:
+            new_tokens = new_tokens[: first_eos + 1]
         new_tokens = new_tokens[: max_new_tokens - len(generated)]
         generated.extend(new_tokens)
-        if len(generated) >= max_new_tokens or (eos_token_id is not None and generated[-1] == eos_token_id):
+        if len(generated) >= max_new_tokens or generated[-1] in eos_ids:
             break
 
         # Roll both models back to the accepted guesses, then append the token that replaced the first rejected one

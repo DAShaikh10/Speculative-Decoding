@@ -13,6 +13,9 @@ config.json
 # Generated manifests (from k8s/*.yaml.tmpl).
 k8s/*.yaml
 
+# Results of the evaluation jobs, copied from the cluster.
+results/
+
 # Miscellaneous.
 .DS_Store
 

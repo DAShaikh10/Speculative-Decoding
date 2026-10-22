@@ -12,3 +12,4 @@ class Task(enum.StrEnum):
 
     SUMMARIZATION = "summarization"
     TRANSLATION = "translation"
+    DIALOGUE = "dialogue"  # Chat with a decoder-only model, the counterpart of the paper's LaMDA dialog task.

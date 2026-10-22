@@ -6,11 +6,14 @@ metadata:
 spec:
   template:
     spec:
+      imagePullSecrets:
+        - name: ${image_pull_secret}
       securityContext:
         runAsUser: 0 # Run Docker image as user root.
       containers:
         - name: speculative-decoding-translation
           image: ${dockerhub_namespace}/overfitclub-speculative-decoding:latest
+          imagePullPolicy: Always
           # entrypoint.sh syncs the environment into the PVC, then runs these args.
           args:
             - python
@@ -31,6 +34,8 @@ spec:
           env:
             - name: TORCH_CUDA
               value: "${torch_cuda}"
+            - name: HF_HUB_DISABLE_XET # The xet downloader drops large transfers sometimes, plain HTTP is steadier.
+              value: "1"
           volumeMounts:
             - name: ${pvc_name}
               mountPath: /cache # Persistent volume claim for the venv, uv cache and HF weights (see entrypoint.sh).
@@ -44,6 +49,7 @@ spec:
               nvidia.com/gpu: "1"
       nodeSelector:
         gpu: ${gpu}
+        ${gpu_product_selector}
       restartPolicy: Never
 
       volumes:
