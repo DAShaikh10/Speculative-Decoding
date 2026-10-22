@@ -12,7 +12,7 @@ spec:
         runAsUser: 0 # Run Docker image as user root.
       containers:
         - name: speculative-decoding-translation
-          image: ${eval_image}
+          image: ${dockerhub_namespace}/overfitclub-speculative-decoding:latest
           imagePullPolicy: Always
           # entrypoint.sh syncs the environment into the PVC, then runs these args.
           args:

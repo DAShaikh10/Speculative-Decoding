@@ -73,14 +73,6 @@ def load_config(path: Path = ROOT / "config.json", overrides: dict[str, str] | N
     registry: str = cfg.get("registry", "").strip().rstrip("/")
     prefix: str = f"{registry}/" if registry else ""
     cfg["image"] = f"{prefix}{cfg['namespace']}/{cfg['image_name']}:{cfg['image_tag']}"
-    # The image of the evaluation jobs, which is built from the Dockerfile in the repository root. It lives on Docker Hub
-    # when `dockerhub_namespace` is set, and in the same registry as the server image otherwise.
-    eval_image_name: str = "overfitclub-speculative-decoding:latest"
-    cfg["eval_image"] = (
-        f"{cfg['dockerhub_namespace']}/{eval_image_name}"
-        if cfg.get("dockerhub_namespace")
-        else f"{prefix}{cfg['namespace']}/{eval_image_name}"
-    )
     # An empty line in the node selector when no GPU product is asked for.
     cfg["gpu_product_selector"] = f"nvidia.com/gpu.product: {cfg['gpu_product']}" if cfg["gpu_product"] else ""
 
