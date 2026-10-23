@@ -1,0 +1,56 @@
+# Scores the fine-tuned T5 v1.1 small on newstest2014 with sacreBLEU (src/finetune/eval.py).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: overfitclub-finetune-eval-small-translation
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: ${image_pull_secret}
+      securityContext:
+        runAsUser: 0 # Run Docker image as user root.
+      containers:
+        - name: finetune-eval-small-translation
+          image: ${dockerhub_namespace}/overfitclub-speculative-decoding-finetune:latest
+          # entrypoint.sh syncs the environment into the PVC, then runs these args.
+          args:
+            - python
+            - -m
+            - finetune.eval
+            - --checkpoint
+            - /cache/finetune/small-translation/best
+            - --task
+            - translation
+            - --split
+            - test
+            - --data-dir
+            - /cache/finetune/tfds
+            - --num-examples
+            - "3003"
+            - --batch-size
+            - "32"
+          env:
+            - name: TORCH_CUDA
+              value: "${torch_cuda}"
+          volumeMounts:
+            - name: ${pvc_name}
+              mountPath: /cache # Persistent volume claim for the venv, uv cache, HF weights and the checkpoints.
+          resources:
+            requests:
+              cpu: "2"
+              memory: "16Gi"
+            limits:
+              cpu: "4"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+      nodeSelector:
+        gpu: ${gpu}
+        ${gpu_product_selector}
+      restartPolicy: Never
+
+      volumes:
+        - name: ${pvc_name}
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+  backoffLimit: 0
