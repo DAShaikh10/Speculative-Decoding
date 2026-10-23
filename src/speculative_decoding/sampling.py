@@ -30,6 +30,25 @@ def standardize(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     return torch.softmax(logits / temperature, dim=-1)
 
 
+def sample_token(probs: torch.Tensor) -> torch.Tensor:
+    """
+    Draw one token from a distribution with the exponential trick: argmax(p / E) with E ~ Exp(1) is distributed as p.
+
+    Unlike `torch.multinomial` this is plain tensor math, so it can be captured in a CUDA graph, where the random draws
+    are renewed on every replay.
+
+    Args:
+        probs: The probabilities, shape (vocab_size,). A one-hot distribution gives its only token.
+
+    Returns:
+        The sampled token id, shape (1,).
+    """
+
+    noise: torch.Tensor = torch.empty_like(probs, dtype=torch.float32).exponential_()
+    # An exact 0 draw would turn the 0 / 0 of an impossible token into NaN.
+    return (probs.float() / noise.clamp_min_(1e-20)).argmax(dim=-1, keepdim=True)
+
+
 def speculative_sample(p: torch.Tensor, q: torch.Tensor, guesses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Speculative sampling for all the guesses of one iteration at once (Algorithm 1 of the paper).

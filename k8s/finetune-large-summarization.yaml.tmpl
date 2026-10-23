@@ -1,0 +1,54 @@
+# Fine-tunes T5 v1.1 large on summarization (src/finetune/PLAN.md). Settings not set below are the recipe defaults of
+# finetune.train.Config. The best checkpoint is written to /cache/finetune/large-summarization/best.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: overfitclub-finetune-large-summarization
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: ${image_pull_secret}
+      securityContext:
+        runAsUser: 0 # Run Docker image as user root.
+      containers:
+        - name: finetune-large-summarization
+          image: ${dockerhub_namespace}/overfitclub-speculative-decoding-finetune:latest
+          # entrypoint.sh syncs the environment into the PVC, then runs these args.
+          args:
+            - python
+            - -m
+            - finetune.train
+            - --set
+            - model=google/t5-v1_1-large
+            - task=summarization
+            - output_dir=/cache/finetune/large-summarization
+            - cache_dir=/cache/finetune/data
+            - data_dir=/cache/finetune/tfds
+            - strategy=none
+            - micro_batch_tokens=4096
+            - gradient_checkpointing=true
+          env:
+            - name: TORCH_CUDA
+              value: "${torch_cuda}"
+          volumeMounts:
+            - name: ${pvc_name}
+              mountPath: /cache # Persistent volume claim for the venv, uv cache, HF weights and the checkpoints.
+          resources:
+            requests:
+              cpu: "4"
+              memory: "64Gi"
+            limits:
+              cpu: "8"
+              memory: "96Gi"
+              nvidia.com/gpu: "1"
+      nodeSelector:
+        gpu: ${gpu}
+        ${gpu_product_selector}
+      restartPolicy: Never
+
+      volumes:
+        - name: ${pvc_name}
+          persistentVolumeClaim:
+            claimName: ${pvc_name}
+  backoffLimit: 0

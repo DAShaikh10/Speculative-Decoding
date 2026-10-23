@@ -20,10 +20,12 @@ import torch
 from transformers import EncoderDecoderCache, PreTrainedConfig, PreTrainedModel, StaticCache
 from transformers.modeling_outputs import BaseModelOutput
 
+from .sampling import sample_token, standardize
+
 logger: logging.Logger = logging.getLogger(__name__)
 
 # Dynamo compiles one graph per combination of bucket, step length and cache state, and gives up past this many.
-MIN_RECOMPILE_LIMIT: int = 64
+MIN_RECOMPILE_LIMIT: int = 128
 
 
 @dataclass
@@ -63,6 +65,7 @@ class BaseRunner:
         self.capacity: int = capacity
         self.compile_mode: str | None = compile_mode
 
+        self._compile_kwargs: dict = {}
         self._step: Callable = self._forward
         if compile_mode is not None:
             torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, MIN_RECOMPILE_LIMIT)
@@ -71,7 +74,8 @@ class BaseRunner:
             # and fail with "Data dependent operator". With the floats specialized each model gets its own graph.
             torch._dynamo.config.specialize_float = True
             options: dict = {"mode": compile_mode} if backend == "inductor" else {}
-            self._step = torch.compile(self._forward, fullgraph=True, dynamic=False, backend=backend, **options)
+            self._compile_kwargs = {"fullgraph": True, "dynamic": False, "backend": backend, **options}
+            self._step = torch.compile(self._forward, **self._compile_kwargs)
 
         self._uses_cuda_graphs: bool = compile_mode == "reduce-overhead" and backend == "inductor"
 
@@ -120,6 +124,10 @@ class ModelRunner(BaseRunner):
         super().__init__(model, capacity, compile_mode, backend)
         self.encoder_bucket: int = encoder_bucket
         self._slots: dict[int, Slot] = {}
+
+        self._loop: Callable = self._draft_loop
+        if compile_mode is not None:
+            self._loop = torch.compile(self._draft_loop, **self._compile_kwargs)
 
     def bucket_for(self, input_length: int) -> int:
         """
@@ -182,26 +190,48 @@ class ModelRunner(BaseRunner):
             next call, so use them before calling `forward` again.
         """
 
-        num_tokens: int = token_ids.shape[1]
-        buffer: torch.Tensor | None = slot.token_buffers.get(num_tokens)
-        if buffer is None:
-            buffer = torch.zeros((1, num_tokens), dtype=torch.long, device=slot.mask.device)
-            torch._dynamo.mark_static_address(buffer)
-            slot.token_buffers[num_tokens] = buffer
-        buffer.copy_(token_ids)
-        slot.position.fill_(position)
+        buffer: torch.Tensor = self._load_step_input(slot, token_ids, position)
 
         if self._uses_cuda_graphs:
             torch.compiler.cudagraph_mark_step_begin()
         logits: torch.Tensor = self._step(buffer, slot.position, slot.encoder_hidden, slot.mask, slot.cache)
 
-        if not slot.primed:
-            # The first call fills the cross-attention cache, the later ones reuse it. Setting it here, rather than
-            # relying on the compiled code to do it, makes the state certain.
-            for layer_idx in range(len(slot.cache.cross_attention_cache.layers)):
-                slot.cache.is_updated[layer_idx] = True
-            slot.primed = True
+        self._mark_primed(slot)
         return logits
+
+    @torch.inference_mode()
+    def draft_loop(
+        self, slot: Slot, token_ids: torch.Tensor, position: int, num_guesses: int, temperature: float
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Draft `num_guesses` tokens autoregressively in a single compiled call, so that with CUDA graphs the whole loop,
+        including the sampling, is one launch instead of one launch and one sampling step per guess.
+
+        Args:
+            slot: The slot returned by `prepare`.
+            token_ids: The tokens to process first, shape (1, num_tokens). They are the positions from `position` on.
+            position: The number of positions that are already cached. Anything cached past it is discarded.
+            num_guesses: How many tokens to sample. The last one is not fed back to the model.
+            temperature: The sampling temperature. 0 means argmax.
+
+        Returns:
+            The guesses, shape (num_guesses,), and the distributions they were sampled from, shape
+            (num_guesses, vocab_size). Both are copies, so a later compiled call can't overwrite them.
+        """
+
+        if num_guesses < 1:
+            raise ValueError("The loop needs at least one guess")
+        buffer: torch.Tensor = self._load_step_input(slot, token_ids, position)
+
+        if self._uses_cuda_graphs:
+            torch.compiler.cudagraph_mark_step_begin()
+        guesses, probs = self._loop(
+            buffer, slot.position, slot.encoder_hidden, slot.mask, slot.cache, num_guesses, temperature
+        )
+
+        self._mark_primed(slot)
+        # The target's compiled step begins a new CUDA graph step, which may reuse the memory of these outputs.
+        return guesses.clone(), probs.clone()
 
     @torch.inference_mode()
     def warmup(self, input_ids: torch.Tensor, step_lengths: Iterable[int], repeats: int = 3) -> None:
@@ -232,6 +262,63 @@ class ModelRunner(BaseRunner):
             "Warmed up bucket %d for steps of %s tokens", self.bucket_for(input_ids.shape[1]), sorted(set(step_lengths))
         )
 
+    @staticmethod
+    def _load_step_input(slot: Slot, token_ids: torch.Tensor, position: int) -> torch.Tensor:
+        """
+        Copy the step input and the cache position into the persistent buffers a compiled step reads.
+        """
+
+        num_tokens: int = token_ids.shape[1]
+        buffer: torch.Tensor | None = slot.token_buffers.get(num_tokens)
+        if buffer is None:
+            buffer = torch.zeros((1, num_tokens), dtype=torch.long, device=slot.mask.device)
+            torch._dynamo.mark_static_address(buffer)
+            slot.token_buffers[num_tokens] = buffer
+        buffer.copy_(token_ids)
+        slot.position.fill_(position)
+        return buffer
+
+    @staticmethod
+    def _mark_primed(slot: Slot) -> None:
+        if not slot.primed:
+            # The first call fills the cross-attention cache, the later ones reuse it. Setting it here, rather than
+            # relying on the compiled code to do it, makes the state certain.
+            for layer_idx in range(len(slot.cache.cross_attention_cache.layers)):
+                slot.cache.is_updated[layer_idx] = True
+            slot.primed = True
+
+    @torch.inference_mode()
+    def warmup_loop(
+        self,
+        input_ids: torch.Tensor,
+        step_lengths: Iterable[int],
+        num_guesses: int,
+        temperature: float,
+        repeats: int = 3,
+    ) -> None:
+        """
+        Compile and record the graphs of `draft_loop` for the bucket of an input, like `warmup` does for single steps.
+
+        Args:
+            input_ids: An input of the bucket to warm up, shape (1, input_len).
+            step_lengths: The numbers of tokens the first step of a loop can be fed.
+            num_guesses: The number of guesses the loop samples.
+            temperature: The sampling temperature the loop will run with.
+            repeats: How many times to run each combination.
+        """
+
+        device: torch.device = input_ids.device
+        for num_tokens in sorted(set(step_lengths)):
+            if 2 * num_tokens + num_guesses - 1 > self.capacity:
+                raise ValueError(f"A loop of {num_guesses} guesses does not fit twice in a capacity of {self.capacity}")
+            tokens: torch.Tensor = torch.zeros((1, num_tokens), dtype=torch.long, device=device)
+            for _ in range(repeats):
+                slot: Slot = self.prepare(input_ids)
+                self.draft_loop(slot, tokens, 0, num_guesses, temperature)
+                self.draft_loop(slot, tokens, num_tokens, num_guesses, temperature)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
     def _forward(
         self,
         token_ids: torch.Tensor,
@@ -247,7 +334,40 @@ class ModelRunner(BaseRunner):
         # Roll the self-attention cache back or forward to `position`. Entries past it are masked out of attention.
         for layer in cache.self_attention_cache.layers:
             layer.cumulative_length.copy_(position)
+        return self._decode(token_ids, encoder_hidden, mask, cache)
 
+    def _draft_loop(
+        self,
+        token_ids: torch.Tensor,
+        position: torch.Tensor,
+        encoder_hidden: torch.Tensor,
+        mask: torch.Tensor,
+        cache: EncoderDecoderCache,
+        num_guesses: int,
+        temperature: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        The drafting loop that is compiled. The cache position advances by itself as the steps write to the cache, so
+        it is only set once, and the sampled token is fed back to the model without leaving the device.
+        """
+
+        for layer in cache.self_attention_cache.layers:
+            layer.cumulative_length.copy_(position)
+
+        guesses: list[torch.Tensor] = []
+        distributions: list[torch.Tensor] = []
+        current: torch.Tensor = token_ids
+        for _ in range(num_guesses):
+            probs: torch.Tensor = standardize(self._decode(current, encoder_hidden, mask, cache)[-1], temperature)
+            guess: torch.Tensor = probs.argmax(dim=-1, keepdim=True) if temperature == 0 else sample_token(probs)
+            guesses.append(guess)
+            distributions.append(probs)
+            current = guess.view(1, 1)
+        return torch.cat(guesses), torch.stack(distributions)
+
+    def _decode(
+        self, token_ids: torch.Tensor, encoder_hidden: torch.Tensor, mask: torch.Tensor, cache: EncoderDecoderCache
+    ) -> torch.Tensor:
         output = self.model(
             encoder_outputs=BaseModelOutput(last_hidden_state=encoder_hidden),
             attention_mask=mask,

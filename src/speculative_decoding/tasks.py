@@ -22,9 +22,10 @@ PREFIXES: dict[Task, str] = {
 }
 
 
-def load_inputs(task: Task, num_examples: int) -> list[ModelInput]:
+def load_inputs(task: Task, num_examples: int | None = None) -> list[ModelInput]:
     """
-    Load the first `num_examples` model inputs of the test split of a task. Only inputs are needed to measure speed.
+    Load the first `num_examples` model inputs of the test split of a task, or all of them if it is None. Only inputs
+    are needed to measure speed.
 
     Translation uses WMT14 de-en (newstest2014), summarization uses CNN/DailyMail 3.0.0, and dialogue uses the first
     user message of the conversations of the UltraChat test split. The paper's dialog prompts are not public.

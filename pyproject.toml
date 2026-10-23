@@ -8,6 +8,8 @@ dependencies = [
     "datasets>=5.1.0",
     "sentencepiece>=0.2.2",
     "transformers>=5.20.1",
+    "pyyaml>=6.0.3",
+    "tqdm>=4.67.1",
 ]
 
 # torch comes from an extra so the CUDA build can be picked: `uv sync --extra cu128` (Hopper/
@@ -17,6 +19,15 @@ cu126 = ["torch==2.7.1"]
 cu128 = ["torch==2.7.1"]
 
 [dependency-groups]
+# For src/finetune. tensorflow-datasets is only needed for `source: tfds`, `hf` runs without it.
+finetune = [
+    "importlib-resources>=6.0",  # tensorflow-datasets imports it without declaring it.
+    "numpy>=2.0",
+    "rouge-score>=0.1.2",
+    "sacrebleu>=2.4.0",
+    "tensorflow-cpu>=2.16",  # tensorflow-datasets reads and writes through it.
+    "tensorflow-datasets>=4.9.0",
+]
 dev = [
     "black>=26.10.1",
     "pylint>=4.1.3",
@@ -29,7 +40,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/speculative_decoding"]
+packages = ["src/speculative_decoding", "src/finetune"]
 
 [tool.black]
 line-length = 120
