@@ -1,18 +1,18 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
     "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 conflicts = [[
@@ -49,7 +49,7 @@ dependencies = [
     { name = "frozenlist" },
     { name = "multidict" },
     { name = "propcache" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
     { name = "yarl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6c/4c/bdccd81e9ee225b69c60e7766c9a5b05364f118f4d383713b89a682d772d/aiohttp-3.14.5.tar.gz", hash = "sha256:5558a7f5a05af9ecf744af91e5baefc436f93c9333e656c27ec253f9a6bbe178", size = 8078052, upload-time = "2026-10-11T01:05:12.408Z" }
@@ -186,7 +186,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "frozenlist" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007, upload-time = "2025-07-03T22:54:43.528Z" }
 wheels = [
@@ -207,8 +207,8 @@ name = "anyio"
 version = "4.15.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "idna", marker = "sys_platform != 'emscripten' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
-    { name = "typing-extensions", marker = "(python_full_version < '3.15' and sys_platform != 'emscripten') or (python_full_version >= '3.15' and extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128') or (sys_platform == 'emscripten' and extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "idna" },
+    { name = "typing-extensions", marker = "python_full_version < '3.15'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/d2/f4d173e22df740bc37b1db102b386ba719b66e95b0f0d751f556b387e6d2/anyio-4.15.1.tar.gz", hash = "sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94", size = 276966, upload-time = "2026-09-05T10:42:39.44Z" }
 wheels = [
@@ -220,17 +220,14 @@ name = "array-record"
 version = "0.8.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "absl-py", marker = "(sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128') or (sys_platform == 'win32' and extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
-    { name = "etils", extra = ["epath"], marker = "(sys_platform != 'emscripten' and sys_platform != 'win32') or (sys_platform == 'emscripten' and extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128') or (sys_platform == 'win32' and extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "absl-py" },
+    { name = "etils", extra = ["epath"] },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/9b/bc104f83cf90a709db6ed7afbe6a2a3b222b6a5fb71fcd9e8a9701619f73/array_record-0.8.6-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:a24936097237f95cdc14f04e8d236f96d9b57c9ac2de1ba92680ad1342ebc8bb", size = 3230212, upload-time = "2026-10-20T22:17:39.067Z" },
     { url = "https://files.pythonhosted.org/packages/5b/74/fead4466f4ec3090c0a6a6f3d4b541089fbe49b1ab9e033c1c459afa4ae5/array_record-0.8.6-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:84a150d96ae69036b8128ef72fd495e354f3bfcdcaf2e29b5723c203f916c7a7", size = 3701131, upload-time = "2026-10-20T22:17:40.749Z" },
     { url = "https://files.pythonhosted.org/packages/01/29/8c5ef6d5dd3c0afac1168dafa2a2a9f6c7e5dbbfba10ccce7d57ab5d436f/array_record-0.8.6-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:76ffba6a477b50e2911e9c094742a17df006fb9b655c6c644aeafc84e35d995c", size = 3846599, upload-time = "2026-10-20T22:17:42.429Z" },
-    { url = "https://files.pythonhosted.org/packages/36/33/6d3678ffa273e77234c482b510334bf82a36a78bb61d71233958558f1408/array_record-0.8.6-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b6f889159112cfb520864b59b9a8da448a8cd7ebc18058cf6a32c2d2407f0135", size = 3230120, upload-time = "2026-10-20T22:17:44.114Z" },
     { url = "https://files.pythonhosted.org/packages/8c/d3/d29b699a5a4b8e09b9e388ac529fcf0af2bb2270cfa2e725f3d75e0ffc0b/array_record-0.8.6-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:33b6c8e525de40fe51541fb1ba5caae6073b2142cb96eee9f9bfeedf5beb8a87", size = 3700811, upload-time = "2026-10-20T22:17:46.233Z" },
     { url = "https://files.pythonhosted.org/packages/57/c8/552514a095d5499b8f7fba59f51b6844fcb3cb654942a5c96fa347a4f0c3/array_record-0.8.6-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5e146e62d91d5d4b1ad1486fdb3baf81eb2a5a61a00e32b1a83ed8f7dee8680f", size = 3846852, upload-time = "2026-10-20T22:17:47.781Z" },
-    { url = "https://files.pythonhosted.org/packages/3c/e9/f4b79fc1d409e7d5bf20cc858a56e4e89eea1667f1c52cf667d1eebdc786/array_record-0.8.6-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:14ec54cb13f7b2fd776d126443435271d9b6b742d129f05d2656c7d91954dd6b", size = 3230023, upload-time = "2026-10-20T22:17:49.571Z" },
     { url = "https://files.pythonhosted.org/packages/5e/ee/35a93f804e13358e2214f791083600ddce243730653a3f59f9eeb39a8ca7/array_record-0.8.6-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:71367b05c28c96f961e19671504561a35d8c4a28d86bfeb43fa612a9563a095f", size = 3701054, upload-time = "2026-10-20T22:17:51.801Z" },
     { url = "https://files.pythonhosted.org/packages/c8/8a/7ef9ed946fd8be4da5b08febb41b63cdc3b31650a718353282d958e1fde6/array_record-0.8.6-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:f3075123c2e54dfd779da2e46c26210ae6238a23d12081c94218f113a6cf219e", size = 3846836, upload-time = "2026-10-20T22:17:53.249Z" },
 ]
@@ -853,8 +850,8 @@ name = "httpcore2"
 version = "2.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11", marker = "sys_platform != 'emscripten' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
-    { name = "truststore", marker = "sys_platform != 'emscripten' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "h11" },
+    { name = "truststore" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cb/f3/1db7aa2bc2524062192bb0e0323969492d1883152a232fe36eea65f4e35c/httpcore2-2.13.1.tar.gz", hash = "sha256:e0aa977abe17e69a3b820a24542a6fa88702676d83880b8d194dcd18408e5103", size = 68071, upload-time = "2026-09-23T07:47:22.372Z" }
 wheels = [
@@ -866,12 +863,12 @@ name = "httpx2"
 version = "2.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio", marker = "sys_platform != 'emscripten' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
-    { name = "httpcore2", marker = "sys_platform != 'emscripten' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
-    { name = "httpx2-jsfetch", marker = "sys_platform == 'emscripten' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "anyio", marker = "sys_platform != 'emscripten'" },
+    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
+    { name = "httpx2-jsfetch", marker = "sys_platform == 'emscripten'" },
     { name = "idna" },
-    { name = "truststore", marker = "sys_platform != 'emscripten' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d5/44/474bef2a0e9d90f1715d32cb98b0738695ca17ba324095fb2497ed7fbd59/httpx2-2.13.1.tar.gz", hash = "sha256:e48744a19e3af5ee48313d0ce5fe941d5422fae5705ea922a4aabf94d7800dfa", size = 100405, upload-time = "2026-09-23T07:47:23.052Z" }
 wheels = [
@@ -895,7 +892,7 @@ dependencies = [
     { name = "click" },
     { name = "filelock" },
     { name = "fsspec" },
-    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "hf-xet", marker = "platform_machine == 'AMD64' or platform_machine == 'ARM64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'" },
     { name = "httpx2" },
     { name = "packaging" },
     { name = "pyyaml" },
@@ -2181,7 +2178,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "python-dateutil" },
-    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "tzdata", marker = "sys_platform == 'emscripten' or sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e2/17/d7b106e05bfa642e8694451e7d3d759c6a241c5386a5d962e4f66c047e06/pandas-3.0.6.tar.gz", hash = "sha256:66b07ef7315a31bfe1089cd3d71a7de781c9dca986762d0b4fe7c0ef17465d10", size = 4667686, upload-time = "2026-09-17T23:23:18.345Z" }
 wheels = [
@@ -2500,7 +2497,7 @@ version = "4.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "astroid" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "dill" },
     { name = "isort" },
     { name = "mccabe" },
@@ -2517,7 +2514,7 @@ name = "pytest"
 version = "9.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "iniconfig" },
     { name = "packaging" },
     { name = "pluggy" },
@@ -2952,7 +2949,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'cu126'", specifier = "==2.7.1", index = "https://download.pytorch.org/whl/cu126", conflict = { package = "speculative-decoding", extra = "cu126" } },
     { name = "torch", marker = "extra == 'cu128'", specifier = "==2.7.1", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "speculative-decoding", extra = "cu128" } },
     { name = "tqdm", specifier = ">=4.67.1" },
-    { name = "transformers", specifier = ">=5.20.1" },
+    { name = "transformers", specifier = ">=5.20.2" },
 ]
 provides-extras = ["cu126", "cu128"]
 
@@ -3032,7 +3029,7 @@ version = "4.9.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
-    { name = "array-record", marker = "sys_platform == 'linux' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "array-record", marker = "sys_platform == 'linux'" },
     { name = "dm-tree" },
     { name = "etils", extra = ["edc", "enp", "epath", "epy", "etree"] },
     { name = "immutabledict" },
@@ -3135,16 +3132,16 @@ version = "2.7.1+cu126"
 source = { registry = "https://download.pytorch.org/whl/cu126" }
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
     "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
@@ -3186,16 +3183,16 @@ version = "2.7.1+cu128"
 source = { registry = "https://download.pytorch.org/whl/cu128" }
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
-    "python_full_version == '3.14.*' and sys_platform == 'win32'",
     "python_full_version >= '3.15' and sys_platform == 'emscripten'",
-    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.15' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'win32'",
+    "python_full_version == '3.14.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.14.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version < '3.13' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'emscripten'",
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
@@ -3239,7 +3236,7 @@ name = "tqdm"
 version = "4.70.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
 wheels = [
@@ -3248,7 +3245,7 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.20.1"
+version = "5.20.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -3261,9 +3258,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/32/03/2e8d6da6a582a0fdbaa7af9c0dab72dac113e6e3ea3b98d6ed67248322cc/transformers-5.20.1.tar.gz", hash = "sha256:25b30879e4c243f00630c1079171ede6d4f6bf76e68f978acd47628a640bc8a0", size = 10224416, upload-time = "2026-10-16T13:02:04.181Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/4e/3cd6f08cc84ee612d40f3cdb1649475e7c997f2d5cbd95ade8780708af62/transformers-5.20.2.tar.gz", hash = "sha256:080871e061546d720be57f5846fce426f46b44d61574907cc7404c2cba49d180", size = 10225379, upload-time = "2026-10-19T17:46:03.092Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/ba/057af605774c3c7a9228ce61d88040749134ef320426403b31bb73755d43/transformers-5.20.1-py3-none-any.whl", hash = "sha256:5f51ce444193e5d0a751e3fa489ddbc2224ff12f6675a5cfefd4044b09757c19", size = 12844669, upload-time = "2026-10-16T13:02:00.488Z" },
+    { url = "https://files.pythonhosted.org/packages/96/b6/724faefed06913dd3e42e0476fe2c42448675c42f687a12bf810aa098005/transformers-5.20.2-py3-none-any.whl", hash = "sha256:7ae75dbc1fb3922aff1b6c97b9e5479d6cf26fd86a8866bfb71324190479f807", size = 12844921, upload-time = "2026-10-19T17:45:59.293Z" },
 ]
 
 [[package]]
@@ -3294,7 +3291,7 @@ version = "0.27.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
-    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-20-speculative-decoding-cu126' and extra == 'extra-20-speculative-decoding-cu128')" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "rich" },
     { name = "shellingham" },
 ]

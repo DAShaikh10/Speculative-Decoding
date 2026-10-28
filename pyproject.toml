@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "datasets>=5.1.0",
     "sentencepiece>=0.2.2",
-    "transformers>=5.20.1",
+    "transformers>=5.20.2",
     "pyyaml>=6.0.3",
     "tqdm>=4.67.1",
 ]
