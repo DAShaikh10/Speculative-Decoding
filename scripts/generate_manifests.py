@@ -43,6 +43,7 @@ DEFAULTS: dict[str, str] = {
     "gamma": "5",
     "temperature": "0",
     "num_examples": "100",
+    "max_new_tokens": "128",  # The unconditional task.
     "memory_limit": "96Gi",  # The weights go straight to the GPU, but the safetensors files are memory mapped.
     "gpu_product": "",  # The `nvidia.com/gpu.product` node label, to tell GPUs of one `gpu` label apart (40GB/80GB A100).
 }

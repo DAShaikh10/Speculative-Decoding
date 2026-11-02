@@ -13,3 +13,4 @@ class Task(enum.StrEnum):
     SUMMARIZATION = "summarization"
     TRANSLATION = "translation"
     DIALOGUE = "dialogue"  # Chat with a decoder-only model, the counterpart of the paper's LaMDA dialog task.
+    UNCONDITIONAL = "unconditional"  # Text from the start token alone, the counterpart of the paper's lm1b GPT-like task.
