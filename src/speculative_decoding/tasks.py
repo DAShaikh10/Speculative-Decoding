@@ -28,8 +28,12 @@ def load_inputs(task: Task, num_examples: int | None = None) -> list[ModelInput]
     are needed to measure speed.
 
     Translation uses WMT14 de-en (newstest2014), summarization uses CNN/DailyMail 3.0.0, and dialogue uses the first
-    user message of the conversations of the UltraChat test split. The paper's dialog prompts are not public.
+    user message of the conversations of the UltraChat test split. Unconditional has no inputs but the start token. The paper's dialog prompts are not public.
     """
+
+    if task == Task.UNCONDITIONAL:
+        # No prompt: every input is empty and `encode` turns it into the start token. Each sample differs by sampling.
+        return [""] * (num_examples if num_examples is not None else 1000)
 
     if task == Task.DIALOGUE:
         chats: IterableDataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="test_sft", streaming=True)

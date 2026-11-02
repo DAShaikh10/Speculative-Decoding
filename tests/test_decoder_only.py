@@ -13,6 +13,8 @@ from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
 from speculative_decoding.decoding import DecoderState, autoregressive_decode, eos_token_ids, speculative_decode
 from speculative_decoding.evaluation import encode, evaluate, make_runner, required_capacity
 from speculative_decoding.runner import DecoderOnlyRunner, ModelRunner
+from speculative_decoding.tasks import load_inputs
+from speculative_decoding.types import Task
 
 MAX_NEW_TOKENS: int = 12
 GAMMA: int = 3
@@ -283,3 +285,56 @@ def test_a_runner_too_small_for_the_run_is_rejected(target, draft) -> None:
     small = make_runner(target, capacity, "default", "eager")
     with pytest.raises(ValueError, match="needs"):
         run(small, draft, gamma=6)
+
+
+class StartTokenizer:
+    bos_token_id = 0
+    eos_token_id = VOCAB - 1
+
+    def __len__(self) -> int:
+        return VOCAB
+
+
+def tiny_neox(seed: int, layers: int):
+    from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
+
+    torch.manual_seed(seed)
+    config = GPTNeoXConfig(
+        vocab_size=VOCAB,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=layers,
+        num_attention_heads=4,
+        max_position_embeddings=256,
+        bos_token_id=0,
+        eos_token_id=VOCAB - 1,
+    )
+    return GPTNeoXForCausalLM(config).eval()
+
+
+def test_unconditional_input_is_the_start_token() -> None:
+    tokenizer = SimpleNamespace(bos_token_id=0, eos_token_id=5)
+    assert encode(tokenizer, "", 64).tolist() == [[0]]
+    assert encode(SimpleNamespace(bos_token_id=None, eos_token_id=5), "", 64).tolist() == [[5]]
+    assert load_inputs(Task.UNCONDITIONAL, 3) == ["", "", ""]
+
+
+def test_unconditional_decoding_of_a_pythia_like_pair_matches_the_baseline() -> None:
+    """Pythia is GPT-NeoX, and an unconditional prompt is one token, so the prefill is empty."""
+    target, draft = tiny_neox(0, 3), tiny_neox(1, 1)
+    tokenizer = StartTokenizer()
+    encoded = [encode(tokenizer, "", 64)]
+    capacity = required_capacity(target, encoded, MAX_NEW_TOKENS, gamma=3)
+    result = evaluate(
+        target=make_runner(target, capacity, "default", "eager"),
+        draft=make_runner(draft, capacity, "default", "eager"),
+        tokenizer=tokenizer,
+        inputs=["", ""],
+        temperature=0.0,
+        gamma=3,
+        max_new_tokens=MAX_NEW_TOKENS,
+        max_input_length=64,
+        compile_mode="default",
+        compile_backend="eager",
+    )
+    assert result.identical_outputs == 2

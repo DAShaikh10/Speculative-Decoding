@@ -58,12 +58,16 @@ class EvaluationResult:
 
 def encode(tokenizer: PreTrainedTokenizerBase, model_input: ModelInput, max_input_length: int) -> torch.Tensor:
     """
-    Tokenize a model input into ids of shape (1, input_len).
+    Tokenize a model input into ids of shape (1, input_len). An empty input is the start token alone.
 
     Chat messages go through the chat template, which adds the special tokens itself, so they are not added twice. Too
     long inputs are cut at the end for text, and at the start for chats so that the final turn and the generation
     prompt, which the model needs, are kept.
     """
+
+    if model_input == "":  # Unconditional generation starts from the start token alone.
+        start_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+        return torch.tensor([[start_id]])
 
     if isinstance(model_input, str):
         return tokenizer(model_input, return_tensors="pt", truncation=True, max_length=max_input_length).input_ids
