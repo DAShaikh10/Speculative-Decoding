@@ -20,6 +20,7 @@ spec:
             - evaluate.py
             - --compile
             - reduce-overhead
+            - --fuse-draft
             - -d
             - ${draft_model_name}
             - -t
@@ -29,15 +30,8 @@ spec:
             - -k
             - translation
             - --static-cache
-            - --fuse-draft
             - --temperature
-            - "0"
-            - --min-generated-tokens
-            - "10000"
-            - --num-examples
-            - "1000"
-            - --max-new-tokens
-            - "512"
+            - "1"
           env:
             - name: TORCH_CUDA
               value: "${torch_cuda}"
