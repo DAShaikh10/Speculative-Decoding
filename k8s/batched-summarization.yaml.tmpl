@@ -1,5 +1,4 @@
 # Batch-size experiment, summarization: ${target_model_name} target, ${draft_model_name} draft, like summarization.yaml (gamma 5, temperature 0).
-# Run batched-smoke.yaml first. The same image notes apply.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -10,17 +9,15 @@ spec:
       imagePullSecrets:
         - name: ${image_pull_secret}
       securityContext:
-        runAsUser: 0 # Run Docker image as user root.
+        runAsUser: 0
       containers:
         - name: batched-sd-summarization
           image: ${dockerhub_namespace}/overfitclub-speculative-decoding:latest
           imagePullPolicy: Always
-          # entrypoint.sh syncs the environment into the PVC, then runs these args.
           args:
             - python
             - -m
             - speculative_decoding.batched_evaluate
-
             - -d
             - ${draft_model_name}
             - -t
@@ -29,7 +26,6 @@ spec:
             - "5"
             - -k
             - summarization
-
             - --temperature
             - "0"
             - --batch-sizes
@@ -40,19 +36,25 @@ spec:
             - "16"
             - "32"
             - --num-examples
-            - "128" # A multiple of every batch size, so they all decode the same inputs.
+            - "128"
+            - --max-new-tokens
+            - "512"
             - --predict
+            - --compile
+            - reduce-overhead
+            - --fuse-draft
+            - --repeats
+            - "5"
             - --output
-            - /cache/results/batched_summarization_results-sd.json # Named after the target model, so the file can't mislabel it.
+            - /cache/results/batched_summarization_results-sd.json
           env:
             - name: TORCH_CUDA
               value: "${torch_cuda}"
-            - name: HF_HUB_DISABLE_XET # The xet downloader drops large transfers sometimes, plain HTTP is steadier.
+            - name: HF_HUB_DISABLE_XET
               value: "1"
           volumeMounts:
             - name: ${pvc_name}
-              mountPath: /cache # Persistent volume claim for the venv, uv cache and HF weights (see entrypoint.sh).
-          resources:
+              mountPath: /cache
             requests:
               cpu: "1"
               memory: "48Gi"

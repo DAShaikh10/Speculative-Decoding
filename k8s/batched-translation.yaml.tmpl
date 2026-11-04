@@ -1,5 +1,4 @@
 # Batch-size experiment, translation: ${target_model_name} target, ${draft_model_name} draft, like translation.yaml (gamma 7, temperature 0).
-# Run batched-smoke.yaml first. The same image notes apply.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -10,12 +9,11 @@ spec:
       imagePullSecrets:
         - name: ${image_pull_secret}
       securityContext:
-        runAsUser: 0 # Run Docker image as user root.
+        runAsUser: 0
       containers:
         - name: batched-sd-translation
           image: ${dockerhub_namespace}/overfitclub-speculative-decoding:latest
           imagePullPolicy: Always
-          # entrypoint.sh syncs the environment into the PVC, then runs these args.
           args:
             - python
             - -m
@@ -38,18 +36,25 @@ spec:
             - "16"
             - "32"
             - --num-examples
-            - "128" # A multiple of every batch size, so they all decode the same inputs.
+            - "128"
+            - --max-new-tokens
+            - "512"
             - --predict
+            - --compile
+            - reduce-overhead
+            - --fuse-draft
+            - --repeats
+            - "5"
             - --output
-            - /cache/results/batched_translation_results_translation.json # Named after the target model, so the file can't mislabel it.
+            - /cache/results/batched_translation_results_translation.json
           env:
             - name: TORCH_CUDA
               value: "${torch_cuda}"
-            - name: HF_HUB_DISABLE_XET # The xet downloader drops large transfers sometimes, plain HTTP is steadier.
+            - name: HF_HUB_DISABLE_XET
               value: "1"
           volumeMounts:
             - name: ${pvc_name}
-              mountPath: /cache # Persistent volume claim for the venv, uv cache and HF weights (see entrypoint.sh).
+              mountPath: /cache
           resources:
             requests:
               cpu: "1"
