@@ -2,7 +2,9 @@
 # GPU. The target comes from `config.json`, the rest has defaults in `scripts/generate_manifests.py`. `--set key=value`
 # overrides any of them. Rendered with:
 #   python3 scripts/generate_manifests.py --templates ngram-fit --set job_name=... --set ngram_file=...
-# Then evaluate with `draft_model_name=unigram:<ngram_file>` or `bigram:<ngram_file>` in the unconditional template.
+# The corpus is a dataset, a configuration and a text column. For a T5 target it is the target side of the training
+# data of the task. Then evaluate with `draft_model_name=unigram:<ngram_file>` or `bigram:<ngram_file>` in the template
+# of the task.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -24,6 +26,12 @@ spec:
             - fit_ngram.py
             - -t
             - ${target_model_name}
+            - --dataset
+            - ${ngram_dataset}
+            - --dataset-config
+            - "${ngram_dataset_config}"
+            - --text-column
+            - ${ngram_text_column}
             - --num-tokens
             - "${ngram_tokens}"
             - --output

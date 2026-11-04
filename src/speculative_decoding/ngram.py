@@ -214,16 +214,31 @@ class NGramRunner(BaseRunner):
     neural network. At temperature 0 the draft picks the most probable token.
     """
 
-    def __init__(self, table: torch.Tensor, order: int, capacity: int = 2**31 - 1) -> None:
+    def __init__(
+        self,
+        table: torch.Tensor,
+        order: int,
+        capacity: int = 2**31 - 1,
+        decoder_start_token_id: int | None = None,
+    ) -> None:
         """
         Args:
             table: The log probabilities from `build_log_probs`.
             order: 1 for a unigram model, 2 for a bigram model.
             capacity: The longest sequence the runner serves. An n-gram model has no cache, so there is no limit.
+            decoder_start_token_id: Set it to draft for an encoder-decoder target such as T5, which decodes from this
+                token and not from the input. The runner then declares itself an encoder-decoder model, so that the
+                decoding state starts from this token and does not take the encoder input for a prompt. None for a
+                decoder-only target.
         """
 
         model = SimpleNamespace(
-            config=SimpleNamespace(is_encoder_decoder=False, vocab_size=table.shape[-1], eos_token_id=None),
+            config=SimpleNamespace(
+                is_encoder_decoder=decoder_start_token_id is not None,
+                decoder_start_token_id=decoder_start_token_id,
+                vocab_size=table.shape[-1],
+                eos_token_id=None,
+            ),
             generation_config=SimpleNamespace(eos_token_id=None),
             dtype=table.dtype,
         )
@@ -241,12 +256,14 @@ class NGramRunner(BaseRunner):
         tokenizer_size: int | None = None,
         smoothing: float = 1.0,
         backoff_strength: float = 1.0,
+        decoder_start_token_id: int | None = None,
     ) -> "NGramRunner":
         """
         Build the model from fitted counts.
 
         Args:
             tokenizer_size: The number of tokens of the target's tokenizer, which the counts must have been fitted with.
+            decoder_start_token_id: The decoder start token of an encoder-decoder target, None for a decoder-only one.
         """
 
         counts: NGramCounts = NGramCounts.load(path)
@@ -255,7 +272,8 @@ class NGramRunner(BaseRunner):
                 f"{path} was fitted with a tokenizer of {counts.tokenizer_size} tokens, the target's has {tokenizer_size}"
             )
         logger.info("Building the order-%d model from %d tokens of %s", order, counts.num_tokens, counts.source)
-        return cls(build_log_probs(counts, order, smoothing, backoff_strength, dtype, device), order)
+        table: torch.Tensor = build_log_probs(counts, order, smoothing, backoff_strength, dtype, device)
+        return cls(table, order, decoder_start_token_id=decoder_start_token_id)
 
     @torch.inference_mode()
     def prepare(self, input_ids: torch.Tensor) -> NGramSlot:  # pylint: disable=unused-argument
@@ -290,6 +308,18 @@ class NGramRunner(BaseRunner):
     @property
     def dtype(self) -> torch.dtype:
         return self.table.dtype
+
+
+def get_column(example: dict, column: str):
+    """
+    The value of a column of a dataset example. A dotted name reaches into nested columns, as in WMT's
+    "translation.de".
+    """
+
+    value = example
+    for key in column.split("."):
+        value = value[key]
+    return value
 
 
 def documents_from(texts: Iterable[str], tokenizer, batch_size: int = 256) -> Iterator[list[list[int]]]:
