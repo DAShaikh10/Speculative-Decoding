@@ -15,6 +15,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSeq2SeqLM
 
 from speculative_decoding import Task
 from speculative_decoding.evaluation import EvaluationResult, encode, evaluate, make_runner, required_capacity
+from speculative_decoding.ngram import NGramRunner, parse_ngram_spec
 from speculative_decoding.tasks import ModelInput, load_inputs
 
 
@@ -34,7 +35,8 @@ def parse_arguments() -> Namespace:
         required=True,
         nargs="+",
         type=str,
-        help="The draft smaller model. Several make a sweep, which loads the target model only once.",
+        help="The draft smaller model, or an n-gram model fitted by fit_ngram.py as 'unigram:<file>' or "
+        "'bigram:<file>'. Several make a sweep, which loads the target model only once.",
     )
     argparser.add_argument(
         "--gamma",
@@ -135,6 +137,11 @@ def parse_arguments() -> Namespace:
         argparser.error("--static-cache and --compile need the KV cache, so they can't be combined with --no-cache")
     if args.fuse_draft and not args.compile:
         argparser.error("--fuse-draft needs --compile")
+    if any(parse_ngram_spec(name) for name in args.draft):
+        if not args.compile:
+            argparser.error("An n-gram draft runs through the runners, so it needs --compile (eager is enough)")
+        if args.fuse_draft:
+            argparser.error("--fuse-draft is for neural drafts, an n-gram draft is a lookup already")
     return args
 
 
@@ -177,6 +184,8 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.target)
     vocabulary: dict[str, int] = tokenizer.get_vocab()
     for draft_name in args.draft:
+        if parse_ngram_spec(draft_name):
+            continue  # Checked against the tokenizer when the counts are loaded.
         if AutoTokenizer.from_pretrained(draft_name).get_vocab() != vocabulary:
             raise SystemExit(f"The draft model {draft_name} and the target model must share a vocabulary.")
 
@@ -193,10 +202,15 @@ def main() -> None:
 
     reports: list[dict] = []
     for draft_name in args.draft:
-        draft = load_model(draft_name, dtype, device)
+        ngram = parse_ngram_spec(draft_name)
+        if ngram:
+            order, path = ngram
+            draft = NGramRunner.from_file(path, order, dtype, device, tokenizer_size=len(tokenizer))
+        else:
+            draft = load_model(draft_name, dtype, device)
         if target.config.is_encoder_decoder != draft.config.is_encoder_decoder:
             raise SystemExit("The draft and target models must both be encoder-decoder or both be decoder-only.")
-        if args.compile:
+        if args.compile and not ngram:
             draft = make_runner(draft, capacity, args.compile, encoder_bucket=args.encoder_bucket)
 
         for temperature in args.temperature:

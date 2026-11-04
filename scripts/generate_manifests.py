@@ -44,6 +44,8 @@ DEFAULTS: dict[str, str] = {
     "temperature": "0",
     "num_examples": "100",
     "max_new_tokens": "128",  # The unconditional task.
+    "ngram_tokens": "100000000",  # The corpus tokens the n-gram drafts are fitted on.
+    "ngram_file": "/cache/ngram/counts.pt",  # Where the fitted counts go on the volume.
     "memory_limit": "96Gi",  # The weights go straight to the GPU, but the safetensors files are memory mapped.
     "gpu_product": "",  # The `nvidia.com/gpu.product` node label, to tell GPUs of one `gpu` label apart (40GB/80GB A100).
 }

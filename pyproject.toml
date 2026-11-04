@@ -10,6 +10,7 @@ dependencies = [
     "transformers>=5.21.0",
     "pyyaml>=6.0.3",
     "tqdm>=4.67.1",
+    "zstandard>=0.25.0",
 ]
 
 # torch comes from an extra so the CUDA build can be picked: `uv sync --extra cu128` (Hopper/
