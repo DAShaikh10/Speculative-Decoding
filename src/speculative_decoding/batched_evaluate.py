@@ -1,13 +1,5 @@
 """
 This script evaluates batched speculative decoding against the batched autoregressive baseline, for several batch sizes.
-
-The paper only evaluates a batch size of 1 (Section 4.1), so this is an extension. It is the batched counterpart of
-`evaluate.py`, with the same tasks, models and flags, and doesn't touch it. See `batched_decoding.py` for the lockstep
-algorithm and why its output distribution is exact.
-
-Usage:
-    python -m speculative_decoding.batched_evaluate -t google-t5/t5-3b -d google-t5/t5-small -g 5 \\
-        -k translation --temperature 0 --batch-sizes 1 2 4 8 16 --num-examples 64 --predict --output batched.json
 """
 
 import json
@@ -22,6 +14,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from speculative_decoding import Task
 from speculative_decoding.batch_scaling import pick_device
 from speculative_decoding.batched_evaluation import BatchedEvaluationResult, evaluate_batched
+from speculative_decoding.batched_runner import reset_compilation
 from speculative_decoding.tasks import load_inputs
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -30,12 +23,6 @@ DEFAULT_BATCH_SIZES: list[int] = [1, 2, 4, 8, 16, 32]
 
 
 def parse_arguments() -> Namespace:
-    """
-    Read the command-line arguments.
-
-    Returns:
-        Namespace: The parsed arguments.
-    """
 
     argparser: ArgumentParser = ArgumentParser("Evaluate batched Speculative Decoding against the batched baseline")
 
@@ -82,12 +69,45 @@ def parse_arguments() -> Namespace:
     )
     argparser.add_argument("--seed", type=int, default=0, help="The random seed. Default: 0")
     argparser.add_argument(
+        "--static-cache",
+        action="store_true",
+        help="Preallocate the KV caches for the whole generation instead of growing them. A runner (--compile) always "
+        "does.",
+    )
+    argparser.add_argument(
+        "--compile",
+        choices=["eager", "default", "reduce-overhead"],
+        default=None,
+        help="Run the models through runners with static caches and padded inputs, and compile the decoding steps "
+        "with torch.compile in this mode. 'reduce-overhead' uses CUDA graphs. 'eager' runs the runners uncompiled.",
+    )
+    argparser.add_argument(
+        "--encoder-bucket",
+        type=int,
+        default=64,
+        help="With --compile, inputs are padded to a multiple of this length, and each length is compiled "
+        "separately. Default: 64",
+    )
+    argparser.add_argument(
+        "--fuse-draft",
+        action="store_true",
+        help="Sample all the guesses of the draft model in one call of its runner, which is one CUDA graph launch with "
+        "--compile reduce-overhead. Needs --compile.",
+    )
+    argparser.add_argument(
         "--skip-baseline", action="store_true", help="Skip the autoregressive baseline, for quick debugging runs."
     )
     argparser.add_argument(
         "--predict",
         action="store_true",
         help="Also measure c(B) and r(B) at every batch size (see batch_scaling.py) and the speedup they predict.",
+    )
+    argparser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="Time the pass over all batches this many times, to get the run-to-run spread of the speedup. Only the "
+        "timed decoding repeats; loading, compiling and warming up happen once. Default: 1",
     )
     argparser.add_argument("--output", type=Path, default=None, help="Where to write the results as JSON.")
 
@@ -102,6 +122,14 @@ def parse_arguments() -> Namespace:
         argparser.error("--num-examples must be at least the smallest batch size")
     if min(args.max_new_tokens, args.max_input_length) < 1:
         argparser.error("--max-new-tokens and --max-input-length must be positive")
+    if args.fuse_draft and not args.compile:
+        argparser.error("--fuse-draft needs --compile")
+    if args.repeats < 1:
+        argparser.error("--repeats must be at least 1")
+    if args.encoder_bucket < 1:
+        argparser.error("--encoder-bucket must be positive")
+    if args.compile and args.max_new_tokens < args.gamma + 1:
+        argparser.error("--compile needs --max-new-tokens of at least --gamma + 1")
     return args
 
 
@@ -110,16 +138,16 @@ def main() -> None:
 
     args: Namespace = parse_arguments()
     torch.manual_seed(args.seed)
-    torch.set_float32_matmul_precision("high")  # Allow TF32 tensor cores for float32 matmuls, like evaluate.py.
+    torch.set_float32_matmul_precision("high")
 
     device: torch.device = pick_device()
     dtype: torch.dtype = getattr(torch, args.dtype)
 
     tokenizer = AutoTokenizer.from_pretrained(args.target)
+    if AutoTokenizer.from_pretrained(args.draft).get_vocab() != tokenizer.get_vocab():
+        raise SystemExit("The draft and target models must share a vocabulary.")
     target = AutoModelForSeq2SeqLM.from_pretrained(args.target, dtype=dtype).to(device).eval()
     draft = AutoModelForSeq2SeqLM.from_pretrained(args.draft, dtype=dtype).to(device).eval()
-    if target.config.vocab_size != draft.config.vocab_size:
-        raise SystemExit("The draft and target models must share a vocabulary.")
 
     inputs: list[str] = load_inputs(args.task, args.num_examples)
 
@@ -143,13 +171,18 @@ def main() -> None:
                 max_input_length=args.max_input_length,
                 run_baseline=not args.skip_baseline,
                 predict=args.predict,
+                static_cache=args.static_cache,
+                compile_mode=args.compile,
+                encoder_bucket=args.encoder_bucket,
+                fuse_draft=args.fuse_draft,
+                repeats=args.repeats,
             )
         except torch.cuda.OutOfMemoryError:
             out_of_memory = True
 
         if out_of_memory:
             logger.warning("Batch size %d ran out of memory, skipping it and the larger ones", batch_size)
-            torch.cuda.empty_cache()
+            reset_compilation()
             break
 
         results.append(result)
@@ -167,7 +200,9 @@ def main() -> None:
         "target": args.target,
         "draft": args.draft,
         "device": device.type,
+        "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "dtype": args.dtype,
+        "max_new_tokens": args.max_new_tokens,
         "results": [asdict(result) for result in results],
     }
     print(json.dumps(report, indent=2))
