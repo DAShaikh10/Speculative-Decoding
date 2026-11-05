@@ -10,7 +10,7 @@ from pathlib import Path
 from datasets import load_dataset
 from transformers import AutoConfig, AutoTokenizer
 
-from speculative_decoding.ngram import CountAccumulator, NGramCounts, documents_from
+from speculative_decoding.ngram import CountAccumulator, NGramCounts, documents_from, get_column
 
 logger: logging.Logger = logging.getLogger("fit_ngram")
 
@@ -32,7 +32,12 @@ def parse_arguments() -> Namespace:
     )
     argparser.add_argument("--dataset-config", default=None, help="The configuration of the dataset, if it has any.")
     argparser.add_argument("--split", default="train", help="The split to count. Default: %(default)s")
-    argparser.add_argument("--text-column", default="text", help="The column that holds the text. Default: %(default)s")
+    argparser.add_argument(
+        "--text-column",
+        default="text",
+        help="The column that holds the text. A dotted name reaches into nested columns, such as translation.de. "
+        "Default: %(default)s",
+    )
     argparser.add_argument(
         "--num-tokens",
         type=int,
@@ -53,12 +58,16 @@ def main() -> None:
     args: Namespace = parse_arguments()
 
     tokenizer = AutoTokenizer.from_pretrained(args.target)
-    vocab_size: int = AutoConfig.from_pretrained(args.target).vocab_size
-    start_id: int = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+    config = AutoConfig.from_pretrained(args.target)
+    vocab_size: int = config.vocab_size
+    if config.is_encoder_decoder:
+        start_id: int = config.decoder_start_token_id  # T5 decodes from the pad token, whatever the input is.
+    else:
+        start_id: int = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
     end_id: int = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else start_id
 
-    dataset = load_dataset(args.dataset, args.dataset_config, split=args.split, streaming=True)
-    texts = (example[args.text_column] for example in dataset)
+    dataset = load_dataset(args.dataset, args.dataset_config or None, split=args.split, streaming=True)
+    texts = (get_column(example, args.text_column) for example in dataset)
     accumulator = CountAccumulator(vocab_size, start_id, end_id, args.max_document_tokens)
 
     next_report: int = 0

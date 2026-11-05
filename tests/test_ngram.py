@@ -3,7 +3,6 @@ Tests for the unigram and bigram draft models: fitting the counts, the smoothed 
 The target models are tiny and randomly initialised, so nothing is downloaded.
 """
 
-
 import pytest
 import torch
 from transformers import Qwen2Config, Qwen2ForCausalLM
@@ -193,3 +192,50 @@ def test_documents_are_tokenized_in_batches() -> None:
     tokenizer = lambda texts, add_special_tokens: {"input_ids": [[ord(c) % VOCAB for c in t] for t in texts]}  # noqa: E731
     batches = list(documents_from(["ab", "cd", "ef"], tokenizer, batch_size=2))
     assert [len(batch) for batch in batches] == [2, 1]
+
+
+def tiny_t5(seed: int, layers: int):
+    from transformers import T5Config, T5ForConditionalGeneration
+
+    torch.manual_seed(seed)
+    config = T5Config(
+        vocab_size=VOCAB,
+        d_model=32,
+        d_kv=8,
+        d_ff=64,
+        num_layers=layers,
+        num_decoder_layers=layers,
+        num_heads=4,
+        decoder_start_token_id=START,
+        eos_token_id=END,
+        pad_token_id=START,
+    )
+    return T5ForConditionalGeneration(config).eval()
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_ngram_draft_for_an_encoder_decoder_target_decodes_from_its_start_token(order: int) -> None:
+    """A T5 target decodes from the pad token whatever the input is, so the draft must not take the input as prompt."""
+    target = tiny_t5(0, layers=2)
+    draft = NGramRunner(build_log_probs(fitted(), order), order, decoder_start_token_id=START)
+    assert draft.config.is_encoder_decoder and draft.config.decoder_start_token_id == START
+    target_runner = make_runner(target, 1 + MAX_NEW_TOKENS + GAMMA + 1, "eager", encoder_bucket=8)
+
+    for input_ids in (torch.tensor([[5, 6, 7, 8, 9]]), torch.tensor([[7, 3]])):
+        baseline = autoregressive_decode(target_runner, input_ids, 0.0, MAX_NEW_TOKENS)
+        tokens, stats = speculative_decode(target_runner, draft, input_ids, 0.0, GAMMA, MAX_NEW_TOKENS)
+        assert tokens == baseline
+        assert stats.drafted > 0
+
+
+def test_a_decoder_only_ngram_draft_is_not_an_encoder_decoder_model() -> None:
+    draft = NGramRunner(build_log_probs(fitted(), 1), 1)
+    assert not draft.config.is_encoder_decoder
+
+
+def test_a_dotted_column_reaches_into_nested_columns() -> None:
+    from speculative_decoding.ngram import get_column
+
+    example = {"translation": {"en": "house", "de": "Haus"}, "article": "text"}
+    assert get_column(example, "translation.de") == "Haus"
+    assert get_column(example, "article") == "text"

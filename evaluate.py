@@ -140,8 +140,6 @@ def parse_arguments() -> Namespace:
     if any(parse_ngram_spec(name) for name in args.draft):
         if not args.compile:
             argparser.error("An n-gram draft runs through the runners, so it needs --compile (eager is enough)")
-        if args.fuse_draft:
-            argparser.error("--fuse-draft is for neural drafts, an n-gram draft is a lookup already")
     return args
 
 
@@ -205,7 +203,10 @@ def main() -> None:
         ngram = parse_ngram_spec(draft_name)
         if ngram:
             order, path = ngram
-            draft = NGramRunner.from_file(path, order, dtype, device, tokenizer_size=len(tokenizer))
+            start_id = target.config.decoder_start_token_id if target.config.is_encoder_decoder else None
+            draft = NGramRunner.from_file(
+                path, order, dtype, device, tokenizer_size=len(tokenizer), decoder_start_token_id=start_id
+            )
         else:
             draft = load_model(draft_name, dtype, device)
         if target.config.is_encoder_decoder != draft.config.is_encoder_decoder:
@@ -231,7 +232,7 @@ def main() -> None:
                     compile_mode=args.compile,
                     encoder_bucket=args.encoder_bucket,
                     min_generated_tokens=args.min_generated_tokens or None,
-                    fuse_draft=args.fuse_draft,
+                    fuse_draft=args.fuse_draft and not ngram,  # A lookup has no loop worth fusing.
                 )
 
                 report: dict = {
