@@ -5,9 +5,9 @@ description = "Replication of the speculative decoding algorithm from the paper 
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "datasets>=5.1.0",
-    "sentencepiece>=0.2.2",
-    "transformers>=5.22.1",
+    "datasets>=5.2.0",
+    "sentencepiece>=0.2.3",
+    "transformers>=5.22.2",
     "pyyaml>=6.0.3",
     "tqdm>=4.67.1",
     "zstandard>=0.25.0",
@@ -33,7 +33,7 @@ dev = [
     "black>=26.10.1",
     "pylint>=4.1.3",
     "pytest>=9.2.0",
-    "ruff>=0.17.3",
+    "ruff>=0.17.4",
 ]
 
 [build-system]
