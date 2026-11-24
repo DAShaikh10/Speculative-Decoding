@@ -1,5 +1,5 @@
-transformers==5.22.2
+transformers==5.23.0
 sentencepiece==0.2.3
 protobuf==7.36.2
-fastapi==0.162.4
+fastapi==0.163.1
 uvicorn==0.54.0
